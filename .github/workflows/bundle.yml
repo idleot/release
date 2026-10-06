@@ -1,0 +1,130 @@
+---
+# Assemble the CDN bundle from the producer artifact images, publish it as
+# ghcr.io/idleot/cdn and serve it from the configured targets.
+#
+# Targets — repository variable IDLEOT_CDN_TARGETS (default "image"):
+#   image  Coolify idleot-cdn runs ghcr.io/idleot/cdn:latest (cdn.idleot.com)
+#   pages  GitHub Pages for this repo, same tree byte for byte
+#   e.g.   "image,pages"
+#
+# Secrets:
+#   GHCR_TOKEN     PAT (read:packages, write:packages) — producer images live in
+#                  private idleot/* packages; GITHUB_TOKEN works only if this repo
+#                  was granted access in each package's settings.
+#   COOLIFY_URL, COOLIFY_TOKEN   for the image target deploy (optional)
+# Variables:
+#   COOLIFY_CDN_UUID   Coolify application uuid of idleot-cdn
+name: CDN bundle
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [cdn-bundle]
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "nginx.conf"
+      - "scripts/**"
+      - ".github/workflows/bundle.yml"
+
+permissions:
+  contents: read
+  packages: write
+  pages: write
+  id-token: write
+
+# Bundles stack on the previous image; never run two at once, never cancel one.
+concurrency:
+  group: cdn-bundle
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  TARGETS: ${{ vars.IDLEOT_CDN_TARGETS || 'image' }}
+
+jobs:
+  bundle:
+    name: Assemble and push
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Extract slices
+        run: |
+          bash scripts/extract-image.sh "$REGISTRY/cdn:latest" /usr/share/nginx/html slices/previous
+          bash scripts/extract-image.sh "$REGISTRY/otclient-wasm:latest" / slices/wasm
+          bash scripts/extract-image.sh "$REGISTRY/otclient-desktop:latest" / slices/desktop
+          bash scripts/extract-image.sh "$REGISTRY/cdn-assets:latest" / slices/assets
+
+      - name: Assemble tree
+        run: |
+          python3 scripts/assemble.py --out site \
+            --previous slices/previous --wasm slices/wasm \
+            --desktop slices/desktop --assets slices/assets
+          size_mb=$(( $(du -sk site | cut -f1) / 1024 ))
+          echo "Bundle size: ${size_mb} MB" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size_mb" -gt 950 ] && [[ "$TARGETS" == *pages* ]]; then
+            echo "::warning::Bundle is ${size_mb} MB — GitHub Pages caps published sites at 1 GB"
+          fi
+
+      - name: Tag
+        id: meta
+        run: echo "tag=$(date -u +%Y%m%d)-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push bundle image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/cdn:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/cdn:latest
+
+      - name: Upload Pages artifact
+        if: contains(env.TARGETS, 'pages')
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy image target on Coolify
+        if: contains(env.TARGETS, 'image')
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_CDN_UUID: ${{ vars.COOLIFY_CDN_UUID }}
+        run: |
+          if [ -z "$COOLIFY_URL" ] || [ -z "$COOLIFY_TOKEN" ] || [ -z "$COOLIFY_CDN_UUID" ]; then
+            echo "::notice::Coolify secrets/vars not set — bundle pushed, deploy skipped"
+            exit 0
+          fi
+          curl -fsS -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+            "${COOLIFY_URL%/}/api/v1/deploy?uuid=${COOLIFY_CDN_UUID}"
+
+  pages:
+    name: Deploy GitHub Pages
+    needs: [bundle]
+    if: contains(vars.IDLEOT_CDN_TARGETS || 'image', 'pages')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4
