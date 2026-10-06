@@ -12,10 +12,17 @@ Output tree (every manifest URL is relative to the bundle root):
   latest/desktop.json          installers per platform
   latest/update.json           in-client updater manifest (desktop/<rev>/files/)
   latest/sources.json          pointers + revision history (drives pruning)
+  latest/release.json          v3 launcher / client-sync manifest (targets -> releases/<rev>/*.json)
   client/<rev>/wasm/...        last --keep-wasm revisions
   desktop/<rev>/...            last --keep-desktop revisions
+  releases/<rev>/*.json        v3 file lists, last --keep-releases revisions (+ any still in latest)
+  content/<aa>/<sha256>        blobs referenced by the kept releases/ lists
   assets/{things,store,outfits,items}/...
   healthz
+
+v3 lists come from <slice>/.idleot/v3/<name>.json with blobs in <slice>/content/:
+  content-desktop / content-web  -> targets.desktop / targets.web   {engine, content}
+  engine-<platform>              -> targets.<platform>              {engine, files}
 """
 from __future__ import annotations
 
@@ -66,6 +73,70 @@ def prune(root: Path, keep: list[str]) -> None:
             shutil.rmtree(child)
 
 
+def blob(out: Path, digest: str) -> Path:
+    return out / "content" / digest[:2] / digest
+
+
+def import_v3(src: Path, out: Path, targets: dict) -> list[str]:
+    """Copy a slice's v3 lists + blobs into the bundle and point targets at them; returns revisions."""
+    lists = sorted((src / ".idleot" / "v3").glob("*.json"))
+    if not lists:
+        return []
+    copy_tree(src / "content", out / "content")
+    revisions: list[str] = []
+    for path in lists:
+        doc = json.loads(path.read_text())
+        rev, name = doc["revision"], path.stem
+        rel = f"releases/{rev}/{name}.json"
+        write_json(out / rel, doc)
+        if name.startswith("content-"):
+            targets[name.removeprefix("content-")] = {"engine": doc["engine"], "content": rel}
+        elif name.startswith("engine-"):
+            targets[name.removeprefix("engine-")] = {"engine": doc["engine"], "files": rel}
+        else:
+            print(f"[assemble] warning: unknown v3 list {path.name}", file=sys.stderr)
+            continue
+        if rev not in revisions:
+            revisions.append(rev)
+    return revisions
+
+
+def list_paths(target: dict) -> str:
+    return target.get("content") or target.get("files") or ""
+
+
+def finish_v3(out: Path, release: dict, history: list[str]) -> None:
+    """Drop broken targets, prune releases/ and content/, write latest/release.json."""
+    targets = release["targets"]
+    for name, target in list(targets.items()):
+        doc = load_json(out / list_paths(target))
+        missing = None if doc is None else sum(
+            1 for f in doc.get("files", {}).values() if not blob(out, f["sha256"]).is_file())
+        if missing is None or missing:
+            print(f"[assemble] warning: v3 target {name} incomplete ({list_paths(target)}) — dropped",
+                  file=sys.stderr)
+            del targets[name]
+
+    keep = set(history) | {list_paths(t).split("/")[1] for t in targets.values()}
+    prune(out / "releases", sorted(keep))
+
+    referenced: set[str] = set()
+    for path in (out / "releases").rglob("*.json") if (out / "releases").is_dir() else []:
+        referenced.update(f["sha256"] for f in json.loads(path.read_text()).get("files", {}).values())
+    pruned = 0
+    for path in (out / "content").rglob("*") if (out / "content").is_dir() else []:
+        if path.is_file() and path.name not in referenced:
+            path.unlink()
+            pruned += 1
+    if pruned:
+        print(f"[assemble] pruned {pruned} unreferenced blobs")
+
+    if targets:
+        write_json(out / "latest" / "release.json", release)
+    else:
+        print("[assemble] warning: no v3 targets — latest/release.json omitted", file=sys.stderr)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True)
@@ -75,6 +146,7 @@ def main() -> int:
     ap.add_argument("--assets")
     ap.add_argument("--keep-wasm", type=int, default=3)
     ap.add_argument("--keep-desktop", type=int, default=2)
+    ap.add_argument("--keep-releases", type=int, default=3)
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -97,8 +169,20 @@ def main() -> int:
     }
 
     if previous:
-        for name in ("client", "desktop", "assets"):
+        for name in ("client", "desktop", "assets", "releases", "content"):
             copy_tree(previous / name, out / name)
+
+    prev_release = (load_json(previous / "latest" / "release.json") if previous else None) or {}
+    release: dict = {
+        "schema": 3,
+        "revision": prev_release.get("revision", ""),
+        "targets": dict(prev_release.get("targets") or {}),
+    }
+    if prev_release.get("launcher"):
+        release["launcher"] = prev_release["launcher"]
+    new_revisions = [r for s in (wasm, desktop) if s for r in import_v3(s, out, release["targets"])]
+    if new_revisions:
+        release["revision"] = max(new_revisions)
 
     if wasm:
         copy_tree(wasm / "client", out / "client")
@@ -123,8 +207,13 @@ def main() -> int:
     history["desktop"] = remember(
         history.get("desktop", []), (sources["desktop"] or {}).get("revision"), args.keep_desktop
     )
+    releases = history.get("releases", [])
+    for rev in sorted(new_revisions):
+        releases = remember(releases, rev, args.keep_releases)
+    history["releases"] = releases
     prune(out / "client", history["wasm"])
     prune(out / "desktop", history["desktop"])
+    finish_v3(out, release, history["releases"])
 
     w = sources["wasm"]
     if w and (out / "client" / w["revision"] / "wasm" / "otclient.js").is_file():

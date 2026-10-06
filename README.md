@@ -59,6 +59,9 @@ latest/client-version.json   WASM revision + relative js/wasm/data paths
 latest/desktop.json          schema 2; engine + per-platform url/file/format/size/sha256
 latest/update.json           in-client updater: {revision, engine, url, files{path: crc32}}
 latest/sources.json          producer pointers + revision history (pruning)
+latest/release.json          schema 3: targets.{web,desktop}.content / targets.<platform>.files
+releases/<rev>/*.json        v3 file lists {revision, engine, entry?, files{path: {sha256, size, exec?}}}
+content/<aa>/<sha256>        content-addressed blobs (immutable; pruned with releases/)
 client/<rev>/wasm/otclient.{js,wasm,data}[.gz|.br]   last 3 revisions
 desktop/<rev>/IdleOT-Setup.exe | IdleOT.dmg | IdleOT-x86_64.AppImage   last 2 revisions
 desktop/<rev>/files/...      encrypted runtime tree the updater patches from
@@ -72,7 +75,7 @@ healthz
 | Slice | Image | Built by |
 |-------|-------|----------|
 | WASM | `ghcr.io/idleot/otclient-wasm:<otclient sha>` | `build-client.yml` |
-| Desktop installers + update tree | `ghcr.io/idleot/otclient-desktop:<otclient sha>` | `build-client.yml` |
+| Desktop installers + update tree + v3 engine/content lists and blobs | `ghcr.io/idleot/otclient-desktop:<otclient sha>` | `build-client.yml` |
 | Things + store + outfits + items | `ghcr.io/idleot/cdn-assets` | local `make -C apps/otclient publish-assets ARGS=--push` (CIP files never touch CI) |
 
 Targets — repository variable `IDLEOT_CDN_TARGETS`: `image` (default), `pages`,

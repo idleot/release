@@ -324,14 +324,14 @@ jobs:
           OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
         run: |
           python3 tools/publish/package_desktop.py --platform macos-arm64 --bin "build/${{ matrix.preset }}/bin" \
-            --revision "${{ needs.check.outputs.revision }}" --stage-bundle
+            --revision "${{ needs.check.outputs.revision }}" --stage-bundle --engine-out "build/${{ matrix.preset }}/engine"
 
       - name: Ad-hoc sign app bundle
         if: runner.os == 'macOS' && env.MACOS_SIGNING != 'true'
         run: |
           cd build/${{ matrix.preset }}/bin
-          xattr -cr IdleOT.app
-          codesign --force --deep --sign - IdleOT.app
+          xattr -cr IdleOT.app ../engine/IdleOT.app
+          codesign --force --deep --sign - IdleOT.app ../engine/IdleOT.app
 
       - name: Developer ID sign app bundle
         if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
@@ -351,10 +351,10 @@ jobs:
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm -f "$RUNNER_TEMP/cert.p12"
           cd build/${{ matrix.preset }}/bin
-          xattr -cr IdleOT.app
+          xattr -cr IdleOT.app ../engine/IdleOT.app
           codesign --force --deep --options runtime --timestamp \
             --entitlements "$GITHUB_WORKSPACE/tools/publish/installer/idleot.entitlements" \
-            --sign "$MACOS_SIGN_IDENTITY" IdleOT.app
+            --sign "$MACOS_SIGN_IDENTITY" IdleOT.app ../engine/IdleOT.app
 
       - name: Sign client executable
         if: runner.os == 'Windows' && env.WINDOWS_SIGNING == 'true'
@@ -381,9 +381,10 @@ jobs:
           OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
           OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
         run: |
-          extra=()
-          # The updater file tree is platform-independent; publish it once.
-          [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--update-files)
+          extra=(--engine-files)
+          # The runtime tree is platform-independent; publish it once.
+          [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--update-files --content-files)
+          [[ "${{ matrix.platform }}" == macos-arm64 ]] && extra+=(--engine-app "build/${{ matrix.preset }}/engine/IdleOT.app")
           python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
             --bin "build/${{ matrix.preset }}/bin" --out "$RUNNER_TEMP/dist" \
             --revision "${{ needs.check.outputs.revision }}" "${extra[@]}"
@@ -447,8 +448,12 @@ jobs:
 
       - name: Merge platforms
         run: |
-          mkdir -p slice/.idleot
-          for d in parts/desktop-*; do cp -R "$d/desktop" slice/; done
+          mkdir -p slice/.idleot/v3 slice/content
+          for d in parts/desktop-*; do
+            cp -R "$d/desktop" slice/
+            cp -R "$d/content/." slice/content/
+            cp "$d"/.idleot/v3/*.json slice/.idleot/v3/
+          done
           python3 - <<'PY'
           import json, pathlib, shutil
           merged = None
@@ -466,6 +471,17 @@ jobs:
           shutil.copy(updates[0], "slice/.idleot/update.json")
           u = json.loads(updates[0].read_text())
           print(f"update tree: revision={u['revision']} engine={u['engine']} files={len(u['files'])}")
+          v3 = pathlib.Path("slice/.idleot/v3")
+          names = ["content-desktop"] + [f"engine-{p}" for p in ("windows-x64", "macos-arm64", "linux-x64")]
+          lists = {n: json.loads((v3 / f"{n}.json").read_text()) for n in names}
+          if len({(d["revision"], d["engine"]) for d in lists.values()}) != 1:
+              raise SystemExit("v3 lists disagree on revision/engine")
+          for n, d in lists.items():
+              missing = [k for k, f in d["files"].items()
+                         if not (pathlib.Path("slice/content") / f["sha256"][:2] / f["sha256"]).is_file()]
+              if missing:
+                  raise SystemExit(f"{n}: {len(missing)} blobs missing, e.g. {missing[0]}")
+              print(f"{n}: {len(d['files'])} files")
           PY
           printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
 
