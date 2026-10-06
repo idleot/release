@@ -196,6 +196,12 @@ jobs:
       APPIMAGETOOL_VERSION: "1.9.1"
       APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
     steps:
+      # Runtime files must be byte-identical across platforms: update.json
+      # checksums come from the Linux build.
+      - name: Keep LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - name: Checkout otclient
         uses: actions/checkout@v5
         with:
