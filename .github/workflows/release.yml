@@ -2,14 +2,15 @@
 # Release orchestrator. An idleot/idleot tag (v*) dispatches this with the tag
 # as `ref`; the umbrella's submodule pointers decide what ships.
 #
-#   resolve -> build client / server / aac (parallel, skipped if :sha exists)
-#           -> deploy server + aac (only once every build succeeded)
+#   resolve -> build client / server / portal (parallel, skipped if :sha exists)
+#           -> deploy server + portal (only once every build succeeded)
 #           -> promote client (CDN bundle with the exact slice tags) -> deploy cdn
 #           -> move :latest to what is live, GitHub Release on the umbrella tag
 #
 # components: auto (submodule changes since the previous v* tag, or all when the
-# tag annotation contains [release:all]) | all | client | server | aac |
-# server+aac | assets (re-bundle live client with the newest cdn-assets).
+# tag annotation contains [release:all]) | all | client | server | portal |
+# server+portal | assets (re-bundle live client with the newest cdn-assets).
+# `aac` is still accepted as an alias for `portal`.
 # skip_build redeploys existing images — use it with an older tag to roll back.
 name: Release
 
@@ -25,7 +26,7 @@ on:
         description: What to release
         type: choice
         default: auto
-        options: [auto, all, client, server, aac, server+aac, assets]
+        options: [auto, all, client, server, portal, server+portal, assets, aac, server+aac]
       skip_build:
         description: Redeploy existing images only (rollback)
         type: boolean
@@ -54,10 +55,10 @@ jobs:
       release_id: ${{ steps.id.outputs.release_id }}
       otclient_sha: ${{ steps.pins.outputs.otclient_sha }}
       crystalserver_sha: ${{ steps.pins.outputs.crystalserver_sha }}
-      slenderaac_sha: ${{ steps.pins.outputs.slenderaac_sha }}
+      portal_sha: ${{ steps.pins.outputs.portal_sha }}
       client: ${{ steps.pins.outputs.client }}
       server: ${{ steps.pins.outputs.server }}
-      aac: ${{ steps.pins.outputs.aac }}
+      portal: ${{ steps.pins.outputs.portal }}
       promote: ${{ steps.pins.outputs.promote }}
       build: ${{ steps.pins.outputs.build }}
       is_tag: ${{ steps.pins.outputs.is_tag }}
@@ -107,27 +108,27 @@ jobs:
           bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/crystalserver" build-image.yml \
             "${{ needs.resolve.outputs.release_id }}" "ref=${{ needs.resolve.outputs.crystalserver_sha }}"
 
-  build-aac:
-    name: Build AAC
+  build-portal:
+    name: Build portal
     needs: [resolve]
-    if: needs.resolve.outputs.aac == 'true' && needs.resolve.outputs.build == 'true'
+    if: needs.resolve.outputs.portal == 'true' && needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: release
     steps:
       - uses: actions/checkout@v5
-      - name: Dispatch slenderaac build-image and wait
+      - name: Dispatch portal build-image and wait
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/slenderaac" build-image.yml \
-            "${{ needs.resolve.outputs.release_id }}" "ref=${{ needs.resolve.outputs.slenderaac_sha }}"
+          bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/portal" build-image.yml \
+            "${{ needs.resolve.outputs.release_id }}" "ref=${{ needs.resolve.outputs.portal_sha }}"
 
   # Nothing goes live until every selected build succeeded, so a failed client
   # build never leaves a new server running against old clients.
   deploy-server:
     name: Deploy server
-    needs: [resolve, build-client, build-server, build-aac]
+    needs: [resolve, build-client, build-server, build-portal]
     if: >-
       always() && needs.resolve.outputs.server == 'true' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
@@ -165,11 +166,11 @@ jobs:
           done
           echo "::error::game server did not come back on :7172"; exit 1
 
-  deploy-aac:
-    name: Deploy AAC
-    needs: [resolve, build-client, build-server, build-aac]
+  deploy-portal:
+    name: Deploy portal
+    needs: [resolve, build-client, build-server, build-portal]
     if: >-
-      always() && needs.resolve.outputs.aac == 'true' &&
+      always() && needs.resolve.outputs.portal == 'true' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -177,23 +178,17 @@ jobs:
     env:
       COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
       COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      APP: ${{ vars.COOLIFY_AAC_UUID }}
-      SHA: ${{ needs.resolve.outputs.slenderaac_sha }}
+      APP: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
+      SHA: ${{ needs.resolve.outputs.portal_sha }}
       SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
     steps:
+      # build-portal (or an earlier release) produced portal:<sha>; the image is
+      # private to idleot/portal, so this repo never inspects it — Coolify pulls.
       - uses: actions/checkout@v5
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Require image
-        run: docker buildx imagetools inspect "$REGISTRY/slenderaac:$SHA" >/dev/null
-      - name: Point idleot-aac at slenderaac:${{ env.SHA }}
+      - name: Point the portal app at portal:${{ env.SHA }}
         run: |
-          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_AAC_UUID"; exit 1; }
-          bash scripts/coolify.sh image "$APP" "$SHA"
+          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_PORTAL_UUID"; exit 1; }
+          bash scripts/coolify.sh image "$APP" "$SHA" "$REGISTRY/portal"
           bash scripts/coolify.sh deploy "$APP"
       - name: Wait for the site
         run: |
@@ -205,7 +200,7 @@ jobs:
 
   promote:
     name: Promote client
-    needs: [resolve, build-client, deploy-server, deploy-aac]
+    needs: [resolve, build-client, deploy-server, deploy-portal]
     if: >-
       always() && needs.resolve.outputs.promote == 'true' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
@@ -246,7 +241,7 @@ jobs:
 
   finalize:
     name: Finalize
-    needs: [resolve, build-client, deploy-server, deploy-aac, promote, deploy-cdn]
+    needs: [resolve, build-client, deploy-server, deploy-portal, promote, deploy-cdn]
     if: >-
       always() && needs.resolve.result == 'success' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
@@ -264,17 +259,14 @@ jobs:
       - name: Move :latest to what is live
         env:
           SERVER: ${{ needs.deploy-server.result }}
-          AAC: ${{ needs.deploy-aac.result }}
           PROMOTE: ${{ needs.promote.result }}
           CLIENT: ${{ needs.resolve.outputs.client }}
           BUNDLE_TAG: ${{ needs.promote.outputs.tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
-          AAC_SHA: ${{ needs.resolve.outputs.slenderaac_sha }}
           OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
         run: |
           retag() { docker buildx imagetools create -t "$REGISTRY/$1:latest" "$REGISTRY/$1:$2" && echo "$1:$2 -> latest"; }
           [[ "$SERVER" == success ]] && retag crystalserver "$CRYSTAL_SHA"
-          [[ "$AAC" == success ]] && retag slenderaac "$AAC_SHA"
           if [[ "$PROMOTE" == success ]]; then
             if [[ "$CLIENT" == true ]]; then
               retag otclient-wasm "$OTC_SHA"
@@ -284,6 +276,17 @@ jobs:
           fi
           true
 
+      - uses: actions/checkout@v5
+        if: needs.deploy-portal.result == 'success'
+
+      - name: Move portal :latest (in idleot/portal)
+        if: needs.deploy-portal.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/portal" build-image.yml \
+            "${{ needs.resolve.outputs.release_id }}-latest" "ref=${{ needs.resolve.outputs.portal_sha }}" "latest=true"
+
       - name: GitHub Release on the umbrella tag
         if: needs.resolve.outputs.is_tag == 'true'
         continue-on-error: true
@@ -291,10 +294,10 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           REF: ${{ needs.resolve.outputs.ref }}
         run: |
-          notes="$(printf 'otclient %s\ncrystalserver %s\nslenderaac %s\nclient=%s server=%s aac=%s cdn=%s\nrun %s/%s/actions/runs/%s\n' \
+          notes="$(printf 'otclient %s\ncrystalserver %s\nportal %s\nclient=%s server=%s portal=%s cdn=%s\nrun %s/%s/actions/runs/%s\n' \
             "${{ needs.resolve.outputs.otclient_sha }}" "${{ needs.resolve.outputs.crystalserver_sha }}" \
-            "${{ needs.resolve.outputs.slenderaac_sha }}" "${{ needs.resolve.outputs.client }}" \
-            "${{ needs.resolve.outputs.server }}" "${{ needs.resolve.outputs.aac }}" "${{ needs.promote.outputs.tag }}" \
+            "${{ needs.resolve.outputs.portal_sha }}" "${{ needs.resolve.outputs.client }}" \
+            "${{ needs.resolve.outputs.server }}" "${{ needs.resolve.outputs.portal }}" "${{ needs.promote.outputs.tag }}" \
             "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
           gh release create "$REF" -R "${{ github.repository_owner }}/idleot" --verify-tag --title "$REF" --notes "$notes" >/dev/null \
             || gh release edit "$REF" -R "${{ github.repository_owner }}/idleot" --notes "$notes" >/dev/null

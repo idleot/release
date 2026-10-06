@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Minimal Coolify API client for releases. Never force-rebuilds.
 #   coolify.sh env <app-uuid> <KEY> <VALUE>    set an app env var (compose apps)
-#   coolify.sh image <app-uuid> <TAG>          set docker_registry_image_tag (image apps)
+#   coolify.sh image <app-uuid> <TAG> [NAME]   set docker_registry_image_tag (+ image name) (image apps)
 #   coolify.sh deploy <app-uuid>               deploy and wait until finished
 # Env: COOLIFY_URL, COOLIFY_TOKEN. Output is limited to statuses — no URLs or
 # response bodies, since this runs in a public repo.
@@ -32,10 +32,11 @@ case "$cmd" in
     echo "[coolify] ${key} set"
     ;;
   image)
-    tag="$1"
-    code="$(call PATCH "/applications/${uuid}" "{\"docker_registry_image_tag\": \"${tag}\"}")"
+    tag="$1"; name="${2:-}"
+    body="$(TAG="$tag" NAME="$name" python3 -c 'import json,os; d={"docker_registry_image_tag": os.environ["TAG"]}; os.environ["NAME"] and d.update(docker_registry_image_name=os.environ["NAME"]); print(json.dumps(d))')"
+    code="$(call PATCH "/applications/${uuid}" "$body")"
     [[ "$code" =~ ^2 ]] || { echo "::error::coolify image tag failed (HTTP ${code})"; exit 1; }
-    echo "[coolify] image tag ${tag}"
+    echo "[coolify] image ${name:-<unchanged>}:${tag}"
     ;;
   deploy)
     code="$(call POST "/deploy?uuid=${uuid}")"

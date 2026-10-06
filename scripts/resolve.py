@@ -9,7 +9,8 @@ Env:
   GH_TOKEN     token that can read idleot/idleot
   OWNER        GitHub org (idleot)
   REF          umbrella tag or commit
-  COMPONENTS   auto | all | client | server | aac | server+aac | assets
+  COMPONENTS   auto | all | client | server | portal | server+portal | assets
+               (`aac` is accepted as an alias for `portal`)
   SKIP_BUILD   true to redeploy existing images only
 
 Writes key=value lines to $GITHUB_OUTPUT (and stdout).
@@ -24,7 +25,10 @@ import urllib.error
 import urllib.request
 
 API = "https://api.github.com"
-ENGINES = {"client": "apps/otclient", "server": "apps/crystalserver", "aac": "apps/slenderaac"}
+ENGINES = {"client": "apps/otclient", "server": "apps/crystalserver", "portal": "apps/portal"}
+# Submodule paths before a rename, so older tags still resolve.
+LEGACY_PATHS = {"portal": ["apps/slenderaac"]}
+ALIASES = {"aac": "portal"}
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -49,10 +53,13 @@ def gh(path: str):
 def pins(repo: str, ref: str) -> dict[str, str]:
     out = {}
     for comp, path in ENGINES.items():
-        entry = gh(f"/repos/{repo}/contents/{path}?ref={ref}")
-        if not entry or entry.get("type") != "submodule":
+        for candidate in [path, *LEGACY_PATHS.get(comp, [])]:
+            entry = gh(f"/repos/{repo}/contents/{candidate}?ref={ref}")
+            if entry and entry.get("type") == "submodule":
+                out[comp] = entry["sha"]
+                break
+        else:
             raise SystemExit(f"[resolve] {path} is not a submodule at {ref}")
-        out[comp] = entry["sha"]
     return out
 
 
@@ -108,7 +115,7 @@ def main() -> int:
     elif mode == "assets":
         selected, reason = set(), "assets only"
     else:
-        selected = set(mode.split("+"))
+        selected = {ALIASES.get(c, c) for c in mode.split("+")}
         unknown = selected - set(ENGINES)
         if unknown:
             raise SystemExit(f"[resolve] unknown components: {sorted(unknown)}")
@@ -120,10 +127,10 @@ def main() -> int:
         "reason": reason,
         "otclient_sha": current["client"],
         "crystalserver_sha": current["server"],
-        "slenderaac_sha": current["aac"],
+        "portal_sha": current["portal"],
         "client": str("client" in selected).lower(),
         "server": str("server" in selected).lower(),
-        "aac": str("aac" in selected).lower(),
+        "portal": str("portal" in selected).lower(),
         "promote": str("client" in selected or mode == "assets").lower(),
         "build": str(not skip_build).lower(),
         "is_tag": str(ref in tags).lower(),
