@@ -166,7 +166,8 @@ jobs:
             os: windows-2025-vs2026
             preset: windows-release
             triplet: ""
-            cflags: /w
+            # Dash form: Git Bash rewrites "/w" in env vars to the path "W:/".
+            cflags: -w
           - platform: macos-arm64
             os: macos-15
             preset: macos-release
@@ -222,7 +223,8 @@ jobs:
           arch: x64
 
       - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: .vcpkg-bincache
           key: vcpkg-desktop-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ env.SHA }}
@@ -264,6 +266,13 @@ jobs:
           fi
           echo "build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
           rm -f src/framework/idleot_encryption.h
+
+      - name: Save vcpkg binary cache
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .vcpkg-bincache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Ad-hoc sign app bundle
         if: runner.os == 'macOS'
