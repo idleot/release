@@ -286,6 +286,8 @@ jobs:
         shell: bash
         env:
           SOURCE_COMMIT: ${{ env.SHA }}
+          IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://cdn.idleot.com' }}
           OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
           OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
         run: |
