@@ -48,6 +48,7 @@ jobs:
   bundle:
     name: Assemble and push
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
     steps:
@@ -98,6 +99,8 @@ jobs:
         with:
           context: .
           push: true
+          provenance: false
+          sbom: false
           tags: |
             ${{ env.REGISTRY }}/cdn:${{ steps.meta.outputs.tag }}
             ${{ env.REGISTRY }}/cdn:latest
@@ -122,11 +125,21 @@ jobs:
           curl -fsS -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
             "${COOLIFY_URL%/}/api/v1/deploy?uuid=${COOLIFY_CDN_UUID}"
 
+      # Each bundle is a full copy of the tree; keep a few for rollback only.
+      - name: Prune old bundle versions
+        uses: actions/delete-package-versions@v5
+        continue-on-error: true
+        with:
+          package-name: cdn
+          package-type: container
+          min-versions-to-keep: 3
+
   pages:
     name: Deploy GitHub Pages
     needs: [bundle]
     if: contains(vars.IDLEOT_CDN_TARGETS || 'image', 'pages')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
