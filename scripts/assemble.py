@@ -4,12 +4,13 @@
 Inputs (directories extracted from images; any may be missing):
   --previous  tree of the last ghcr.io/idleot/cdn image (/usr/share/nginx/html)
   --wasm      otclient-wasm slice   (client/<rev>/wasm/*, .idleot/wasm.json)
-  --desktop   otclient-desktop slice (desktop/<rev>/*.zip, .idleot/desktop.json)
+  --desktop   otclient-desktop slice (desktop/<rev>/{installers,files/}, .idleot/{desktop,update}.json)
   --assets    cdn-assets slice      (assets/things/*, assets/store/*, .idleot/assets.json)
 
 Output tree (every manifest URL is relative to the bundle root):
   latest/client-version.json
-  latest/desktop.json
+  latest/desktop.json          installers per platform
+  latest/update.json           in-client updater manifest (desktop/<rev>/files/)
   latest/sources.json          pointers + revision history (drives pruning)
   client/<rev>/wasm/...        last --keep-wasm revisions
   desktop/<rev>/...            last --keep-desktop revisions
@@ -90,6 +91,7 @@ def main() -> int:
     sources: dict = {
         "wasm": prev_sources.get("wasm"),
         "desktop": prev_sources.get("desktop"),
+        "update": prev_sources.get("update"),
         "assets": prev_sources.get("assets"),
         "history": prev_sources.get("history") or {"wasm": [], "desktop": []},
     }
@@ -104,6 +106,12 @@ def main() -> int:
     if desktop:
         copy_tree(desktop / "desktop", out / "desktop")
         sources["desktop"] = load_json(desktop / ".idleot" / "desktop.json") or sources["desktop"]
+    update = load_json(desktop / ".idleot" / "update.json") if desktop else None
+    if update is None and previous:
+        update = load_json(previous / "latest" / "update.json")
+    if update:
+        write_json(out / "latest" / "update.json", update)
+        sources["update"] = {"revision": update.get("revision"), "engine": update.get("engine")}
     if assets:
         # The assets slice is authoritative for assets/ (no stale things zips).
         shutil.rmtree(out / "assets", ignore_errors=True)
@@ -137,14 +145,21 @@ def main() -> int:
     d = sources["desktop"]
     if d and all((out / p["url"]).is_file() for p in d.get("platforms", {}).values()):
         write_json(out / "latest" / "desktop.json", {
-            "schema": 1,
+            "schema": d.get("schema", 1),
             "revision": d["revision"],
+            "engine": d.get("engine", ""),
             "productSha": d.get("productSha", ""),
             "publishedAt": d.get("publishedAt", ""),
             "platforms": d.get("platforms", {}),
         })
     else:
         print("[assemble] warning: no desktop slice — latest/desktop.json omitted", file=sys.stderr)
+
+    u = load_json(out / "latest" / "update.json")
+    if u and not (out / u.get("url", "")).is_dir():
+        # Pruned or missing tree: clients would 404 on every file; drop the manifest.
+        print(f"[assemble] warning: {u.get('url')} missing — latest/update.json omitted", file=sys.stderr)
+        (out / "latest" / "update.json").unlink()
 
     if not (out / "assets" / "things" / "manifest.json").is_file():
         print("[assemble] warning: no assets slice — assets/things/manifest.json missing", file=sys.stderr)

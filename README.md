@@ -44,8 +44,9 @@ This repo is public; the engines are not.
 - Compiler output is written to files; logs show only an error summary
   (`-w`, no carets). Cross-repo builds report only their conclusion.
 - No layer or compiler caches of product code; only third-party vcpkg/emsdk.
-- Artifacts are only the encrypted desktop zips the CDN serves anyway
-  (1-day retention). Slice and bundle images are private GHCR packages.
+- Artifacts are only the encrypted desktop installers + updater file tree the
+  CDN serves anyway (1-day retention). Slice and bundle images are private
+  GHCR packages.
 - No `pull_request` workflows; outside contributors need approval; the default
   token is read-only; secrets live in the `release` environment (main only).
 
@@ -55,10 +56,12 @@ All URLs inside manifests are relative to the bundle root.
 
 ```
 latest/client-version.json   WASM revision + relative js/wasm/data paths
-latest/desktop.json          schema 1; per-platform url/size/sha256
+latest/desktop.json          schema 2; engine + per-platform url/file/format/size/sha256
+latest/update.json           in-client updater: {revision, engine, url, files{path: crc32}}
 latest/sources.json          producer pointers + revision history (pruning)
 client/<rev>/wasm/otclient.{js,wasm,data}[.gz|.br]   last 3 revisions
-desktop/<rev>/idleot-{windows-x64,linux-x64,macos-arm64}.zip   last 2 revisions
+desktop/<rev>/IdleOT-Setup.exe | IdleOT.dmg | IdleOT-x86_64.AppImage   last 2 revisions
+desktop/<rev>/files/...      encrypted runtime tree the updater patches from
 assets/things/manifest.json + things-<version>.zip
 assets/store/...             store icons (Crystal coinImagesURL)
 healthz
@@ -67,7 +70,7 @@ healthz
 | Slice | Image | Built by |
 |-------|-------|----------|
 | WASM | `ghcr.io/idleot/otclient-wasm:<otclient sha>` | `build-client.yml` |
-| Desktop zips | `ghcr.io/idleot/otclient-desktop:<otclient sha>` | `build-client.yml` |
+| Desktop installers + update tree | `ghcr.io/idleot/otclient-desktop:<otclient sha>` | `build-client.yml` |
 | Things + store | `ghcr.io/idleot/cdn-assets` | local `make -C apps/otclient publish-assets ARGS=--push` (CIP files never touch CI) |
 
 Targets — repository variable `IDLEOT_CDN_TARGETS`: `image` (default), `pages`,
@@ -84,6 +87,19 @@ things zip public; WASM still loads through the AAC same-origin `/cdn` proxy).
 | `COOLIFY_URL`, `COOLIFY_TOKEN` | `release` env secret | Coolify API |
 | `COOLIFY_SERVER_UUID`, `COOLIFY_AAC_UUID`, `COOLIFY_CDN_UUID` | `release` env variable | Coolify apps |
 | `IDLEOT_CDN_TARGETS` | repo variable | `image` / `pages` / `image,pages` |
+| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` + vars `TRUSTED_SIGNING_ENDPOINT`, `TRUSTED_SIGNING_ACCOUNT`, `TRUSTED_SIGNING_PROFILE` | `release` env (optional) | Windows signing (Azure Trusted Signing); unsigned when absent |
+| `MACOS_CERTIFICATE_P12` (base64), `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | `release` env secret (optional) | macOS Developer ID signing + notarization; ad-hoc when absent |
+
+## Desktop installers and updates
+
+Windows ships an Inno Setup installer (per-user, no admin), macOS a DMG
+(drag `IdleOT.app` to Applications), Linux an AppImage. Installed clients run
+`modules/custom/idleot_updater` before boot: while `latest/update.json`'s
+`engine` (hash of the otclient native sources) matches the install, changed
+Lua/OTUI/data files are downloaded into the user write dir (`update/<engine>/`,
+mounted ahead of the read-only install) and the client restarts; when the engine
+changed, the client points players to `/download` for the new installer.
+Files removed from the runtime keep existing in older installs until reinstall.
 
 Every private package (`otclient-wasm`, `otclient-desktop`, `cdn`,
 `cdn-assets`, `crystalserver`, `slenderaac`) grants this repo **Actions access:
