@@ -448,10 +448,11 @@ jobs:
 
       - name: Merge platforms
         run: |
-          mkdir -p slice/.idleot/v3 slice/content
+          mkdir -p slice/.idleot/v3 slice/content slice/packs
           for d in parts/desktop-*; do
             cp -R "$d/desktop" slice/
             cp -R "$d/content/." slice/content/
+            if [[ -d "$d/packs" ]]; then cp -R "$d/packs/." slice/packs/; fi
             cp "$d"/.idleot/v3/*.json slice/.idleot/v3/
           done
           python3 - <<'PY'
@@ -481,7 +482,11 @@ jobs:
                          if not (pathlib.Path("slice/content") / f["sha256"][:2] / f["sha256"]).is_file()]
               if missing:
                   raise SystemExit(f"{n}: {len(missing)} blobs missing, e.g. {missing[0]}")
-              print(f"{n}: {len(d['files'])} files")
+              packs = [p["sha256"] for p in d.get("packs", [])
+                       if not (pathlib.Path("slice/packs") / p["sha256"][:2] / f"{p['sha256']}.zip").is_file()]
+              if packs:
+                  raise SystemExit(f"{n}: {len(packs)} packs missing, e.g. {packs[0]}")
+              print(f"{n}: {len(d['files'])} files, {len(d.get('packs', []))} packs")
           PY
           printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
 

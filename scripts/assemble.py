@@ -5,7 +5,7 @@ Inputs (directories extracted from images; any may be missing):
   --previous  tree of the last ghcr.io/idleot/cdn image (/usr/share/nginx/html)
   --wasm      otclient-wasm slice   (client/<rev>/wasm/*, .idleot/wasm.json)
   --desktop   otclient-desktop slice (desktop/<rev>/{installers,files/}, .idleot/{desktop,update}.json)
-  --assets    cdn-assets slice      (assets/{things,store,outfits,items}/*, .idleot/assets.json)
+  --assets    cdn-assets slice      (assets/{store,outfits,items}/*, content-things list, .idleot/assets.json)
   --launcher  launcher slice        (launcher/<version>/*, .idleot/launcher.json)
 
 Output tree (every manifest URL is relative to the bundle root, except
@@ -17,16 +17,19 @@ launcher/latest.json — the Tauri updater needs absolute URLs, see --cdn-url):
   latest/update.json           in-client updater manifest (desktop/<rev>/files/)
   latest/sources.json          pointers + revision history (drives pruning)
   latest/release.json          v3 launcher / client-sync manifest (targets -> releases/<rev>/*.json)
-  client/<rev>/wasm/...        last --keep-wasm revisions
+  client/<rev>/wasm/...        last --keep-wasm revisions (targets.web.wasm)
   desktop/<rev>/...            last --keep-desktop revisions
   releases/<rev>/*.json        v3 file lists, last --keep-releases revisions (+ any still in latest)
   content/<aa>/<sha256>        blobs referenced by the kept releases/ lists
-  assets/{things,store,outfits,items}/...
+  packs/<aa>/<sha256>.zip      zip packs of those blobs (list "packs")
+  assets/{store,outfits,items}/...
   healthz
 
-v3 lists come from <slice>/.idleot/v3/<name>.json with blobs in <slice>/content/:
+v3 lists come from <slice>/.idleot/v3/<name>.json with blobs in <slice>/content/
+and packs in <slice>/packs/:
   content-desktop / content-web  -> targets.desktop / targets.web   {engine, content}
   engine-<platform>              -> targets.<platform>              {engine, files}
+  content-things (assets slice)  -> targets.{desktop,web}.things    sprites, merged by client-sync
 """
 from __future__ import annotations
 
@@ -77,8 +80,15 @@ def prune(root: Path, keep: list[str]) -> None:
             shutil.rmtree(child)
 
 
+THINGS_TARGETS = ("desktop", "web")
+
+
 def blob(out: Path, digest: str) -> Path:
     return out / "content" / digest[:2] / digest
+
+
+def pack(out: Path, digest: str) -> Path:
+    return out / "packs" / digest[:2] / f"{digest}.zip"
 
 
 def import_v3(src: Path, out: Path, targets: dict) -> list[str]:
@@ -87,12 +97,16 @@ def import_v3(src: Path, out: Path, targets: dict) -> list[str]:
     if not lists:
         return []
     copy_tree(src / "content", out / "content")
+    copy_tree(src / "packs", out / "packs")
     revisions: list[str] = []
     for path in lists:
         doc = json.loads(path.read_text())
         rev, name = doc["revision"], path.stem
         rel = f"releases/{rev}/{name}.json"
         write_json(out / rel, doc)
+        if name == "content-things":
+            print(f"[assemble] warning: {path} belongs in the assets slice", file=sys.stderr)
+            continue
         if name.startswith("content-"):
             targets[name.removeprefix("content-")] = {"engine": doc["engine"], "content": rel}
         elif name.startswith("engine-"):
@@ -105,35 +119,69 @@ def import_v3(src: Path, out: Path, targets: dict) -> list[str]:
     return revisions
 
 
+def import_things(src: Path, out: Path) -> str | None:
+    """Copy the assets slice's sprites list + blobs + packs; returns its releases/ path."""
+    path = src / ".idleot" / "v3" / "content-things.json"
+    doc = load_json(path)
+    if doc is None:
+        return None
+    copy_tree(src / "content", out / "content")
+    copy_tree(src / "packs", out / "packs")
+    rel = f"releases/things-{doc['revision']}/content-things.json"
+    write_json(out / rel, doc)
+    return rel
+
+
 def list_paths(target: dict) -> str:
     return target.get("content") or target.get("files") or ""
+
+
+def target_lists(target: dict) -> list[str]:
+    return [p for p in (list_paths(target), target.get("things")) if p]
+
+
+def list_missing(out: Path, rel: str) -> int | None:
+    """Blobs a list references that the bundle lacks (None: list unreadable)."""
+    doc = load_json(out / rel)
+    if doc is None:
+        return None
+    return sum(1 for f in doc.get("files", {}).values() if not blob(out, f["sha256"]).is_file())
 
 
 def finish_v3(out: Path, release: dict, history: list[str]) -> None:
     """Drop broken targets, prune releases/ and content/, write latest/release.json."""
     targets = release["targets"]
     for name, target in list(targets.items()):
-        doc = load_json(out / list_paths(target))
-        missing = None if doc is None else sum(
-            1 for f in doc.get("files", {}).values() if not blob(out, f["sha256"]).is_file())
-        if missing is None or missing:
-            print(f"[assemble] warning: v3 target {name} incomplete ({list_paths(target)}) — dropped",
+        broken = [rel for rel in target_lists(target) if list_missing(out, rel) != 0]
+        wasm = target.get("wasm")
+        if wasm and not (out / wasm / "otclient.js").is_file():
+            broken.append(wasm)
+        if broken:
+            print(f"[assemble] warning: v3 target {name} incomplete ({', '.join(broken)}) — dropped",
                   file=sys.stderr)
             del targets[name]
 
-    keep = set(history) | {list_paths(t).split("/")[1] for t in targets.values()}
+    keep = set(history) | {rel.split("/")[1] for t in targets.values() for rel in target_lists(t)}
     prune(out / "releases", sorted(keep))
 
-    referenced: set[str] = set()
+    blobs: set[str] = set()
+    packs: set[str] = set()
     for path in (out / "releases").rglob("*.json") if (out / "releases").is_dir() else []:
-        referenced.update(f["sha256"] for f in json.loads(path.read_text()).get("files", {}).values())
-    pruned = 0
-    for path in (out / "content").rglob("*") if (out / "content").is_dir() else []:
-        if path.is_file() and path.name not in referenced:
-            path.unlink()
-            pruned += 1
-    if pruned:
-        print(f"[assemble] pruned {pruned} unreferenced blobs")
+        doc = json.loads(path.read_text())
+        blobs.update(f["sha256"] for f in doc.get("files", {}).values())
+        for p in doc.get("packs", []):
+            packs.add(f"{p['sha256']}.zip")
+            if not pack(out, p["sha256"]).is_file():
+                # client-sync falls back to per-file blobs when a pack 404s.
+                print(f"[assemble] warning: {path.relative_to(out)} pack {p['sha256']} missing", file=sys.stderr)
+    for kind, root, referenced in (("blobs", out / "content", blobs), ("packs", out / "packs", packs)):
+        pruned = 0
+        for path in root.rglob("*") if root.is_dir() else []:
+            if path.is_file() and path.name not in referenced:
+                path.unlink()
+                pruned += 1
+        if pruned:
+            print(f"[assemble] pruned {pruned} unreferenced {kind}")
 
     if targets:
         write_json(out / "latest" / "release.json", release)
@@ -212,7 +260,7 @@ def main() -> int:
     }
 
     if previous:
-        for name in ("client", "desktop", "assets", "releases", "content", "launcher"):
+        for name in ("client", "desktop", "assets", "releases", "content", "packs", "launcher"):
             copy_tree(previous / name, out / name)
 
     prev_release = (load_json(previous / "latest" / "release.json") if previous else None) or {}
@@ -241,11 +289,19 @@ def main() -> int:
     if update:
         write_json(out / "latest" / "update.json", update)
         sources["update"] = {"revision": update.get("revision"), "engine": update.get("engine")}
+    things = next((t["things"] for t in prev_release.get("targets", {}).values() if t.get("things")), None)
     if assets:
-        # The assets slice is authoritative for assets/ (no stale things zips).
+        # The assets slice is authoritative for assets/.
         shutil.rmtree(out / "assets", ignore_errors=True)
         copy_tree(assets / "assets", out / "assets")
         sources["assets"] = load_json(assets / ".idleot" / "assets.json") or sources["assets"]
+        things = import_things(assets, out) or things
+    for name in THINGS_TARGETS:
+        if name in release["targets"]:
+            if things:
+                release["targets"][name]["things"] = things
+            else:
+                release["targets"][name].pop("things", None)
     if launcher_slice:
         copy_tree(launcher_slice / "launcher", out / "launcher")
         sources["launcher"] = load_json(launcher_slice / ".idleot" / "launcher.json") or sources["launcher"]
@@ -272,6 +328,10 @@ def main() -> int:
         release["launcher"] = {"version": launcher_desktop["version"]}
     else:
         release.pop("launcher", None)
+    web = release["targets"].get("web")
+    if web:
+        # content-web is stamped with the WASM revision it was built with.
+        web["wasm"] = f"client/{web['engine']}/wasm"
     finish_v3(out, release, history["releases"])
 
     w = sources["wasm"]
@@ -320,8 +380,8 @@ def main() -> int:
         print(f"[assemble] warning: {u.get('url')} missing — latest/update.json omitted", file=sys.stderr)
         (out / "latest" / "update.json").unlink()
 
-    if not (out / "assets" / "things" / "manifest.json").is_file():
-        print("[assemble] warning: no assets slice — assets/things/manifest.json missing", file=sys.stderr)
+    if not any(t.get("things") for t in release["targets"].values()):
+        print("[assemble] warning: no assets slice — targets carry no things list", file=sys.stderr)
 
     write_json(out / "latest" / "sources.json", sources)
     (out / "healthz").write_text("ok\n")
