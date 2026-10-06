@@ -1,33 +1,54 @@
 ---
-# Assemble the CDN bundle from the producer artifact images, publish it as
-# ghcr.io/idleot/cdn and serve it from the configured targets.
+# Assemble the CDN bundle from exact slice tags and push ghcr.io/idleot/cdn:<tag>.
+# Called by release.yml at promotion time (after the server is live); it does
+# not deploy and does not move :latest — release.yml does both once Coolify
+# is running the new tag. `:latest` therefore always means "live".
+#
+# The previous tree is the live bundle (cdn:latest), so older WASM/desktop
+# revisions stay reachable for clients that have not reloaded yet.
 #
 # Targets — repository variable IDLEOT_CDN_TARGETS (default "image"):
-#   image  Coolify idleot-cdn runs ghcr.io/idleot/cdn:latest (cdn.idleot.com)
-#   pages  GitHub Pages for this repo, same tree byte for byte
-#   e.g.   "image,pages"
+#   image  Coolify idleot-cdn runs ghcr.io/idleot/cdn:<tag> (cdn.idleot.com)
+#   pages  GitHub Pages for this repo, same tree byte for byte (publishes on run)
 #
-# Secrets:
-#   GHCR_TOKEN     classic PAT with read:packages — producer images live in
-#                  private idleot/* packages (fine-grained PATs are rejected by
-#                  GHCR). Optional if this repo was granted Actions access in each
-#                  slice package's settings. The cdn image is pushed with GITHUB_TOKEN.
-#   COOLIFY_URL, COOLIFY_TOKEN   for the image target deploy (optional)
-# Variables:
-#   COOLIFY_CDN_UUID   Coolify application uuid of idleot-cdn
+# Slice packages are private; this repo has Actions access in each package's
+# settings, so GITHUB_TOKEN reads and pushes them.
 name: CDN bundle
 
+run-name: CDN bundle ${{ inputs.release_id }}
+
 on:
+  workflow_call:
+    inputs:
+      wasm_tag:
+        type: string
+        default: latest
+      desktop_tag:
+        type: string
+        default: latest
+      assets_tag:
+        type: string
+        default: latest
+      release_id:
+        type: string
+        default: ""
+    outputs:
+      tag:
+        value: ${{ jobs.bundle.outputs.tag }}
   workflow_dispatch:
-  repository_dispatch:
-    types: [cdn-bundle]
-  push:
-    branches: [main]
-    paths:
-      - "Dockerfile"
-      - "nginx.conf"
-      - "scripts/**"
-      - ".github/workflows/bundle.yml"
+    inputs:
+      wasm_tag:
+        description: otclient-wasm tag (otclient SHA or latest)
+        default: latest
+      desktop_tag:
+        description: otclient-desktop tag (otclient SHA or latest)
+        default: latest
+      assets_tag:
+        description: cdn-assets tag
+        default: latest
+      release_id:
+        description: Correlation id (set by release.yml)
+        default: ""
 
 permissions:
   contents: read
@@ -54,20 +75,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository }}
+          ref: main
 
-      - name: Login to GHCR (read slices)
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract slices
+        env:
+          WASM_TAG: ${{ inputs.wasm_tag }}
+          DESKTOP_TAG: ${{ inputs.desktop_tag }}
+          ASSETS_TAG: ${{ inputs.assets_tag }}
         run: |
           bash scripts/extract-image.sh "$REGISTRY/cdn:latest" /usr/share/nginx/html slices/previous
-          bash scripts/extract-image.sh "$REGISTRY/otclient-wasm:latest" / slices/wasm
-          bash scripts/extract-image.sh "$REGISTRY/otclient-desktop:latest" / slices/desktop
-          bash scripts/extract-image.sh "$REGISTRY/cdn-assets:latest" / slices/assets
+          bash scripts/extract-image.sh "$REGISTRY/otclient-wasm:${WASM_TAG}" / slices/wasm
+          bash scripts/extract-image.sh "$REGISTRY/otclient-desktop:${DESKTOP_TAG}" / slices/desktop
+          bash scripts/extract-image.sh "$REGISTRY/cdn-assets:${ASSETS_TAG}" / slices/assets
 
       - name: Assemble tree
         run: |
@@ -84,13 +112,6 @@ jobs:
         id: meta
         run: echo "tag=$(date -u +%Y%m%d)-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
-      - name: Login to GHCR (push cdn)
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -101,9 +122,7 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          tags: |
-            ${{ env.REGISTRY }}/cdn:${{ steps.meta.outputs.tag }}
-            ${{ env.REGISTRY }}/cdn:latest
+          tags: ${{ env.REGISTRY }}/cdn:${{ steps.meta.outputs.tag }}
 
       - name: Upload Pages artifact
         if: contains(env.TARGETS, 'pages')
@@ -111,28 +130,14 @@ jobs:
         with:
           path: site
 
-      - name: Deploy image target on Coolify
-        if: contains(env.TARGETS, 'image')
-        env:
-          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          COOLIFY_CDN_UUID: ${{ vars.COOLIFY_CDN_UUID }}
-        run: |
-          if [ -z "$COOLIFY_URL" ] || [ -z "$COOLIFY_TOKEN" ] || [ -z "$COOLIFY_CDN_UUID" ]; then
-            echo "::notice::Coolify secrets/vars not set — bundle pushed, deploy skipped"
-            exit 0
-          fi
-          curl -fsS -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-            "${COOLIFY_URL%/}/api/v1/deploy?uuid=${COOLIFY_CDN_UUID}"
-
-      # Each bundle is a full copy of the tree; keep a few for rollback only.
+      # Each bundle is a full copy of the tree; keep enough for rollback.
       - name: Prune old bundle versions
         uses: actions/delete-package-versions@v5
         continue-on-error: true
         with:
           package-name: cdn
           package-type: container
-          min-versions-to-keep: 3
+          min-versions-to-keep: 10
 
   pages:
     name: Deploy GitHub Pages

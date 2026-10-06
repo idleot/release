@@ -1,0 +1,343 @@
+---
+# Build the release clients (browser WASM + desktop Linux/Windows/macOS) from
+# private idleot/otclient at a pinned SHA and push them as private, files-only
+# slice images tagged :<sha>. Nothing is promoted here — release.yml hands the
+# tags to bundle.yml after the server is live.
+#
+# This repo is public (free runners), so:
+#   - Lua/OTUI ship encrypted (OTC_ENCRYPTION_* secrets, encrypt_assets.py).
+#   - Compiler output goes to files; logs show only an error summary.
+#   - No layer/compiler caches of product code; only third-party vcpkg/emsdk.
+#   - Artifacts hold only the encrypted zips the CDN publishes anyway.
+name: Build client
+
+run-name: Build client ${{ inputs.otclient_sha }} ${{ inputs.release_id }}
+
+on:
+  workflow_call:
+    inputs:
+      otclient_sha:
+        type: string
+        required: true
+      release_id:
+        type: string
+        default: ""
+    outputs:
+      revision:
+        value: ${{ jobs.check.outputs.revision }}
+  workflow_dispatch:
+    inputs:
+      otclient_sha:
+        description: idleot/otclient commit SHA (full)
+        required: true
+      release_id:
+        description: Correlation id (set by release.yml)
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  SHA: ${{ inputs.otclient_sha }}
+
+jobs:
+  check:
+    name: Check existing slices
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      wasm: ${{ steps.exists.outputs.wasm }}
+      desktop: ${{ steps.exists.outputs.desktop }}
+      revision: ${{ steps.exists.outputs.revision }}
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Look up :sha tags
+        id: exists
+        run: |
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::otclient_sha must be a full commit SHA"; exit 1; }
+          for slice in wasm desktop; do
+            if docker buildx imagetools inspect "$REGISTRY/otclient-$slice:$SHA" >/dev/null 2>&1; then
+              echo "$slice=true" >> "$GITHUB_OUTPUT"; echo "otclient-$slice:$SHA exists — skipping"
+            else
+              echo "$slice=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+          echo "revision=$(date -u +%Y%m%d)-${SHA::7}" >> "$GITHUB_OUTPUT"
+
+  wasm:
+    name: WASM
+    needs: [check]
+    if: needs.check.outputs.wasm != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: release
+    steps:
+      - name: Checkout otclient
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/otclient
+          ref: ${{ env.SHA }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: false
+
+      - name: Write encryption secret
+        env:
+          OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
+          OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
+        run: |
+          umask 077
+          printf 'OTC_ENCRYPTION_PASSWORD=%s\nOTC_ENCRYPTION_HEADER=%s\n' \
+            "$OTC_ENCRYPTION_PASSWORD" "$OTC_ENCRYPTION_HEADER" > "$RUNNER_TEMP/otc_encryption"
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore third-party cache mounts
+        id: mounts
+        uses: actions/cache@v4
+        with:
+          path: buildkit-mounts
+          key: wasm-mounts-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ env.SHA }}
+          restore-keys: |
+            wasm-mounts-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-
+            wasm-mounts-
+
+      - name: Inject cache mounts into BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          skip-extraction: ${{ steps.mounts.outputs.cache-hit }}
+          cache-map: |
+            {
+              "buildkit-mounts/vcpkg-binaries": { "target": "/var/cache/vcpkg-binaries", "id": "idleot-vcpkg-binaries" },
+              "buildkit-mounts/vcpkg-downloads": { "target": "/var/cache/vcpkg-downloads", "id": "idleot-vcpkg-downloads" },
+              "buildkit-mounts/emsdk": { "target": "/var/cache/emsdk", "id": "idleot-emsdk" },
+              "buildkit-mounts/emsdk-compile": { "target": "/var/cache/emsdk-compile", "id": "idleot-emsdk-compile" }
+            }
+
+      - name: Build and push otclient-wasm:${{ env.SHA }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: artifact
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}
+          secret-files: |
+            otc_encryption=${{ runner.temp }}/otc_encryption
+          build-args: |
+            SOURCE_COMMIT=${{ env.SHA }}
+            IDLEOT_QUIET_BUILD=1
+            IDLEOT_EXTRA_CFLAGS=-w -fno-caret-diagnostics
+
+  desktop:
+    name: Desktop (${{ matrix.platform }})
+    needs: [check]
+    if: needs.check.outputs.desktop != 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-24.04
+            preset: linux-release
+            triplet: x64-linux-release
+            cflags: -w -fno-diagnostics-show-caret
+          # windows-release already uses the release-only x64-windows-static-release overlay.
+          - platform: windows-x64
+            os: windows-2025-vs2026
+            preset: windows-release
+            triplet: ""
+            cflags: /w
+          - platform: macos-arm64
+            os: macos-15
+            preset: macos-release
+            triplet: arm64-osx-release
+            cflags: -w -fno-caret-diagnostics
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    environment: release
+    env:
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/.vcpkg-bincache,readwrite"
+      CFLAGS: ${{ matrix.cflags }}
+      CXXFLAGS: ${{ matrix.cflags }}
+    steps:
+      - name: Checkout otclient
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/otclient
+          ref: ${{ env.SHA }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: false
+
+      - name: Get vcpkg baseline
+        shell: bash
+        run: |
+          commit="$(grep '"builtin-baseline"' vcpkg.json | awk -F: '{print $2}' | tr -d '," \r')"
+          echo "VCPKG_GIT_COMMIT_ID=${commit}" >> "$GITHUB_ENV"
+          mkdir -p .vcpkg-bincache
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq autoconf autoconf-archive automake gcc-14 g++-14 \
+            libgl1-mesa-dev libglu1-mesa-dev libltdl-dev libtool libtool-bin \
+            libx11-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev \
+            linux-libc-dev make ninja-build perl pkg-config >/dev/null
+          echo "CC=gcc-14" >> "$GITHUB_ENV"
+          echo "CXX=g++-14" >> "$GITHUB_ENV"
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew list ninja >/dev/null 2>&1 || brew install ninja
+
+      - name: Remove Windows pre-installed MySQL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Remove-Item -Recurse -Force C:\mysql* -ErrorAction SilentlyContinue
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: .vcpkg-bincache
+          key: vcpkg-desktop-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ env.SHA }}
+          restore-keys: |
+            vcpkg-desktop-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-
+            vcpkg-desktop-${{ matrix.platform }}-
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitURL: "https://github.com/microsoft/vcpkg.git"
+          vcpkgGitCommitId: ${{ env.VCPKG_GIT_COMMIT_ID }}
+
+      - name: Write encryption header
+        shell: bash
+        env:
+          OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
+          OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
+        run: python3 tools/publish/encrypt_assets.py header src/framework/idleot_encryption.h
+
+      - name: Configure and build (quiet)
+        shell: bash
+        run: |
+          summary() {
+            echo "::group::error summary ($1)"
+            grep -E "(error|Error|FAILED|CMake Error)" "$1" | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 60
+            echo "::endgroup::"
+          }
+          args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF)
+          if [[ -n "${{ matrix.triplet }}" ]]; then
+            args+=("-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}" "-DVCPKG_HOST_TRIPLET=${{ matrix.triplet }}")
+          fi
+          if ! cmake --preset "${{ matrix.preset }}" "${args[@]}" > "$RUNNER_TEMP/configure.log" 2>&1; then
+            summary "$RUNNER_TEMP/configure.log"; exit 1
+          fi
+          echo "configure ok ($(wc -l < "$RUNNER_TEMP/configure.log") lines suppressed)"
+          if ! cmake --build --preset "${{ matrix.preset }}" > "$RUNNER_TEMP/build.log" 2>&1; then
+            summary "$RUNNER_TEMP/build.log"; exit 1
+          fi
+          echo "build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
+          rm -f src/framework/idleot_encryption.h
+
+      - name: Ad-hoc sign app bundle
+        if: runner.os == 'macOS'
+        run: |
+          cd build/${{ matrix.preset }}/bin
+          xattr -cr OTClient.app
+          codesign --force --deep --sign - OTClient.app
+
+      - name: Package encrypted zip
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ env.SHA }}
+          OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
+          OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
+        run: |
+          python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
+            --bin "build/${{ matrix.preset }}/bin" --out "$RUNNER_TEMP/dist" \
+            --revision "${{ needs.check.outputs.revision }}"
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: ${{ runner.temp }}/dist
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop-publish:
+    name: Push otclient-desktop
+    needs: [check, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download zips
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: parts
+
+      - name: Merge platforms
+        run: |
+          mkdir -p slice/.idleot
+          for d in parts/desktop-*; do cp -R "$d/desktop" slice/; done
+          python3 - <<'PY'
+          import json, pathlib
+          merged = None
+          for p in sorted(pathlib.Path("parts").glob("desktop-*/.idleot/desktop.json")):
+              d = json.loads(p.read_text())
+              if merged is None:
+                  merged = d
+              else:
+                  merged["platforms"].update(d["platforms"])
+          pathlib.Path("slice/.idleot/desktop.json").write_text(json.dumps(merged, indent=2) + "\n")
+          print(json.dumps(merged, indent=2))
+          PY
+          printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push otclient-desktop:${{ env.SHA }}
+        uses: docker/build-push-action@v6
+        with:
+          context: slice
+          file: Dockerfile.slice
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/otclient-desktop:${{ env.SHA }}

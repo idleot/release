@@ -1,0 +1,301 @@
+---
+# Release orchestrator. An idleot/idleot tag (v*) dispatches this with the tag
+# as `ref`; the umbrella's submodule pointers decide what ships.
+#
+#   resolve -> build client / server / aac (parallel, skipped if :sha exists)
+#           -> deploy server + aac (only once every build succeeded)
+#           -> promote client (CDN bundle with the exact slice tags) -> deploy cdn
+#           -> move :latest to what is live, GitHub Release on the umbrella tag
+#
+# components: auto (submodule changes since the previous v* tag, or all when the
+# tag annotation contains [release:all]) | all | client | server | aac |
+# server+aac | assets (re-bundle live client with the newest cdn-assets).
+# skip_build redeploys existing images — use it with an older tag to roll back.
+name: Release
+
+run-name: Release ${{ inputs.ref }} (${{ inputs.components }}${{ inputs.skip_build && ', no build' || '' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: idleot/idleot tag (v1.2.3) or commit SHA
+        required: true
+      components:
+        description: What to release
+        type: choice
+        default: auto
+        options: [auto, all, client, server, aac, server+aac, assets]
+      skip_build:
+        description: Redeploy existing images only (rollback)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  resolve:
+    name: Resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release
+    outputs:
+      release_id: ${{ steps.id.outputs.release_id }}
+      otclient_sha: ${{ steps.pins.outputs.otclient_sha }}
+      crystalserver_sha: ${{ steps.pins.outputs.crystalserver_sha }}
+      slenderaac_sha: ${{ steps.pins.outputs.slenderaac_sha }}
+      client: ${{ steps.pins.outputs.client }}
+      server: ${{ steps.pins.outputs.server }}
+      aac: ${{ steps.pins.outputs.aac }}
+      promote: ${{ steps.pins.outputs.promote }}
+      build: ${{ steps.pins.outputs.build }}
+      is_tag: ${{ steps.pins.outputs.is_tag }}
+      ref: ${{ steps.pins.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Release id
+        id: id
+        run: echo "release_id=rel-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve pins and components
+        id: pins
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REF: ${{ inputs.ref }}
+          COMPONENTS: ${{ inputs.components }}
+          SKIP_BUILD: ${{ inputs.skip_build }}
+        run: |
+          python3 scripts/resolve.py | tee "$RUNNER_TEMP/resolve.txt"
+          { echo "### Release ${REF}"; echo '```'; cat "$RUNNER_TEMP/resolve.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  build-client:
+    name: Build client
+    needs: [resolve]
+    if: needs.resolve.outputs.client == 'true' && needs.resolve.outputs.build == 'true'
+    uses: ./.github/workflows/build-client.yml
+    secrets: inherit
+    with:
+      otclient_sha: ${{ needs.resolve.outputs.otclient_sha }}
+      release_id: ${{ needs.resolve.outputs.release_id }}
+
+  build-server:
+    name: Build server
+    needs: [resolve]
+    if: needs.resolve.outputs.server == 'true' && needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dispatch crystalserver build-image and wait
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/crystalserver" build-image.yml \
+            "${{ needs.resolve.outputs.release_id }}" "ref=${{ needs.resolve.outputs.crystalserver_sha }}"
+
+  build-aac:
+    name: Build AAC
+    needs: [resolve]
+    if: needs.resolve.outputs.aac == 'true' && needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dispatch slenderaac build-image and wait
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/slenderaac" build-image.yml \
+            "${{ needs.resolve.outputs.release_id }}" "ref=${{ needs.resolve.outputs.slenderaac_sha }}"
+
+  # Nothing goes live until every selected build succeeded, so a failed client
+  # build never leaves a new server running against old clients.
+  deploy-server:
+    name: Deploy server
+    needs: [resolve, build-client, build-server, build-aac]
+    if: >-
+      always() && needs.resolve.outputs.server == 'true' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    env:
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+      APP: ${{ vars.COOLIFY_SERVER_UUID }}
+      SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
+      GAME_HOST: ${{ vars.IDLEOT_GAME_HOST || 'idleot.com' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require image
+        run: docker buildx imagetools inspect "$REGISTRY/crystalserver:$SHA" >/dev/null
+      - name: Point idleot-server at crystalserver:${{ env.SHA }}
+        run: |
+          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_SERVER_UUID"; exit 1; }
+          bash scripts/coolify.sh env "$APP" IMAGE_TAG "$SHA"
+          bash scripts/coolify.sh deploy "$APP"
+      - name: Wait for the game server
+        run: |
+          for _ in $(seq 1 30); do
+            if timeout 5 bash -c "exec 3<>/dev/tcp/${GAME_HOST}/7172" 2>/dev/null; then
+              echo "game port open"; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::game server did not come back on :7172"; exit 1
+
+  deploy-aac:
+    name: Deploy AAC
+    needs: [resolve, build-client, build-server, build-aac]
+    if: >-
+      always() && needs.resolve.outputs.aac == 'true' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    env:
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+      APP: ${{ vars.COOLIFY_AAC_UUID }}
+      SHA: ${{ needs.resolve.outputs.slenderaac_sha }}
+      SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require image
+        run: docker buildx imagetools inspect "$REGISTRY/slenderaac:$SHA" >/dev/null
+      - name: Point idleot-aac at slenderaac:${{ env.SHA }}
+        run: |
+          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_AAC_UUID"; exit 1; }
+          bash scripts/coolify.sh image "$APP" "$SHA"
+          bash scripts/coolify.sh deploy "$APP"
+      - name: Wait for the site
+        run: |
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null "$SITE_URL/" && { echo "site up"; exit 0; }
+            sleep 10
+          done
+          echo "::error::site did not come back"; exit 1
+
+  promote:
+    name: Promote client
+    needs: [resolve, build-client, deploy-server, deploy-aac]
+    if: >-
+      always() && needs.resolve.outputs.promote == 'true' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    uses: ./.github/workflows/bundle.yml
+    secrets: inherit
+    with:
+      wasm_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
+      desktop_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
+      release_id: ${{ needs.resolve.outputs.release_id }}
+
+  deploy-cdn:
+    name: Deploy CDN
+    needs: [resolve, promote]
+    if: always() && needs.promote.result == 'success' && contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    env:
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+      APP: ${{ vars.COOLIFY_CDN_UUID }}
+      TAG: ${{ needs.promote.outputs.tag }}
+      CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Point idleot-cdn at cdn:${{ env.TAG }}
+        run: |
+          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
+          bash scripts/coolify.sh image "$APP" "$TAG"
+          bash scripts/coolify.sh deploy "$APP"
+      - name: Wait for the CDN
+        run: |
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null "$CDN_URL/latest/client-version.json" && { echo "cdn up"; exit 0; }
+            sleep 10
+          done
+          echo "::error::CDN did not serve latest/client-version.json"; exit 1
+
+  finalize:
+    name: Finalize
+    needs: [resolve, build-client, deploy-server, deploy-aac, promote, deploy-cdn]
+    if: >-
+      always() && needs.resolve.result == 'success' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move :latest to what is live
+        env:
+          SERVER: ${{ needs.deploy-server.result }}
+          AAC: ${{ needs.deploy-aac.result }}
+          PROMOTE: ${{ needs.promote.result }}
+          CLIENT: ${{ needs.resolve.outputs.client }}
+          BUNDLE_TAG: ${{ needs.promote.outputs.tag }}
+          CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
+          AAC_SHA: ${{ needs.resolve.outputs.slenderaac_sha }}
+          OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
+        run: |
+          retag() { docker buildx imagetools create -t "$REGISTRY/$1:latest" "$REGISTRY/$1:$2" && echo "$1:$2 -> latest"; }
+          [[ "$SERVER" == success ]] && retag crystalserver "$CRYSTAL_SHA"
+          [[ "$AAC" == success ]] && retag slenderaac "$AAC_SHA"
+          if [[ "$PROMOTE" == success ]]; then
+            if [[ "$CLIENT" == true ]]; then
+              retag otclient-wasm "$OTC_SHA"
+              retag otclient-desktop "$OTC_SHA"
+            fi
+            retag cdn "$BUNDLE_TAG"
+          fi
+          true
+
+      - name: GitHub Release on the umbrella tag
+        if: needs.resolve.outputs.is_tag == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REF: ${{ needs.resolve.outputs.ref }}
+        run: |
+          notes="$(printf 'otclient %s\ncrystalserver %s\nslenderaac %s\nclient=%s server=%s aac=%s cdn=%s\nrun %s/%s/actions/runs/%s\n' \
+            "${{ needs.resolve.outputs.otclient_sha }}" "${{ needs.resolve.outputs.crystalserver_sha }}" \
+            "${{ needs.resolve.outputs.slenderaac_sha }}" "${{ needs.resolve.outputs.client }}" \
+            "${{ needs.resolve.outputs.server }}" "${{ needs.resolve.outputs.aac }}" "${{ needs.promote.outputs.tag }}" \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          gh release create "$REF" -R "${{ github.repository_owner }}/idleot" --verify-tag --title "$REF" --notes "$notes" >/dev/null \
+            || gh release edit "$REF" -R "${{ github.repository_owner }}/idleot" --notes "$notes" >/dev/null
+          echo "release notes written to the umbrella tag"
