@@ -29,6 +29,9 @@ on:
       assets_tag:
         type: string
         default: latest
+      launcher_tag:
+        type: string
+        default: latest
       release_id:
         type: string
         default: ""
@@ -45,6 +48,9 @@ on:
         default: latest
       assets_tag:
         description: cdn-assets tag
+        default: latest
+      launcher_tag:
+        description: launcher tag (version or latest)
         default: latest
       release_id:
         description: Correlation id (set by release.yml)
@@ -91,17 +97,21 @@ jobs:
           WASM_TAG: ${{ inputs.wasm_tag }}
           DESKTOP_TAG: ${{ inputs.desktop_tag }}
           ASSETS_TAG: ${{ inputs.assets_tag }}
+          LAUNCHER_TAG: ${{ inputs.launcher_tag }}
         run: |
           bash scripts/extract-image.sh "$REGISTRY/cdn:latest" /usr/share/nginx/html slices/previous
           bash scripts/extract-image.sh "$REGISTRY/otclient-wasm:${WASM_TAG}" / slices/wasm
           bash scripts/extract-image.sh "$REGISTRY/otclient-desktop:${DESKTOP_TAG}" / slices/desktop
           bash scripts/extract-image.sh "$REGISTRY/cdn-assets:${ASSETS_TAG}" / slices/assets
+          bash scripts/extract-image.sh "$REGISTRY/launcher:${LAUNCHER_TAG}" / slices/launcher
 
       - name: Assemble tree
+        env:
+          CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
         run: |
-          python3 scripts/assemble.py --out site \
+          python3 scripts/assemble.py --out site --cdn-url "$CDN_URL" \
             --previous slices/previous --wasm slices/wasm \
-            --desktop slices/desktop --assets slices/assets
+            --desktop slices/desktop --assets slices/assets --launcher slices/launcher
           size_mb=$(( $(du -sk site | cut -f1) / 1024 ))
           echo "Bundle size: ${size_mb} MB" >> "$GITHUB_STEP_SUMMARY"
           if [ "$size_mb" -gt 950 ] && [[ "$TARGETS" == *pages* ]]; then

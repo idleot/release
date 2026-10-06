@@ -3,13 +3,14 @@
 
 The umbrella tag pins every engine via submodule pointers. A component is
 selected when its pointer changed since the previous v* tag, or when forced by
-COMPONENTS / a `[release:all]` flag in the tag annotation.
+COMPONENTS / a `[release:all]` flag in the tag annotation. The launcher lives in
+the portal repo and ships when apps/launcher/package.json "version" changed.
 
 Env:
-  GH_TOKEN     token that can read idleot/idleot
+  GH_TOKEN     token that can read idleot/idleot (and idleot/portal contents)
   OWNER        GitHub org (idleot)
   REF          umbrella tag or commit
-  COMPONENTS   auto | all | client | server | portal | server+portal | assets
+  COMPONENTS   auto | all | client | server | portal | launcher | server+portal | assets
                (`aac` is accepted as an alias for `portal`)
   SKIP_BUILD   true to redeploy existing images only
 
@@ -17,6 +18,7 @@ Writes key=value lines to $GITHUB_OUTPUT (and stdout).
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -29,6 +31,7 @@ ENGINES = {"client": "apps/otclient", "server": "apps/crystalserver", "portal": 
 # Submodule paths before a rename, so older tags still resolve.
 LEGACY_PATHS = {"portal": ["apps/slenderaac"]}
 ALIASES = {"aac": "portal"}
+COMPONENTS = [*ENGINES, "launcher"]
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -61,6 +64,17 @@ def pins(repo: str, ref: str) -> dict[str, str]:
         else:
             raise SystemExit(f"[resolve] {path} is not a submodule at {ref}")
     return out
+
+
+def launcher_version(owner: str, portal_sha: str) -> str | None:
+    try:
+        entry = gh(f"/repos/{owner}/portal/contents/apps/launcher/package.json?ref={portal_sha}")
+    except SystemExit as exc:
+        print(f"::warning::cannot read the launcher version ({exc}) — RELEASE_TOKEN needs Contents read on portal")
+        return None
+    if not entry:
+        return None
+    return json.loads(base64.b64decode(entry["content"])).get("version")
 
 
 def tag_message(repo: str, tag: str) -> str:
@@ -104,19 +118,23 @@ def main() -> int:
     selected: set[str]
     if mode == "auto":
         if "[release:all]" in message or prev is None:
-            selected = set(ENGINES)
+            selected = set(COMPONENTS)
             reason = "[release:all]" if prev else "first release"
         else:
             before = pins(repo, prev)
             selected = {c for c in ENGINES if before[c] != current[c]}
+            if "portal" in selected:
+                version = launcher_version(owner, current["portal"])
+                if version and version != launcher_version(owner, before["portal"]):
+                    selected.add("launcher")
             reason = f"changed since {prev}"
     elif mode == "all":
-        selected, reason = set(ENGINES), "forced all"
+        selected, reason = set(COMPONENTS), "forced all"
     elif mode == "assets":
         selected, reason = set(), "assets only"
     else:
         selected = {ALIASES.get(c, c) for c in mode.split("+")}
-        unknown = selected - set(ENGINES)
+        unknown = selected - set(COMPONENTS)
         if unknown:
             raise SystemExit(f"[resolve] unknown components: {sorted(unknown)}")
         reason = "forced"
@@ -131,7 +149,8 @@ def main() -> int:
         "client": str("client" in selected).lower(),
         "server": str("server" in selected).lower(),
         "portal": str("portal" in selected).lower(),
-        "promote": str("client" in selected or mode == "assets").lower(),
+        "launcher": str("launcher" in selected).lower(),
+        "promote": str(bool(selected & {"client", "launcher"}) or mode == "assets").lower(),
         "build": str(not skip_build).lower(),
         "is_tag": str(ref in tags).lower(),
     }

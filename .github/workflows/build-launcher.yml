@@ -1,0 +1,322 @@
+---
+# Build the IdleOT launcher (Tauri v2) from private idleot/portal at a pinned
+# SHA and push a private, files-only slice image ghcr.io/idleot/launcher:<version>:
+#
+#   launcher/<version>/IdleOT-Setup.exe        Windows NSIS installer (per-user) + .sig
+#   launcher/<version>/IdleOT.dmg              macOS
+#   launcher/<version>/IdleOT.app.tar.gz       macOS self-update archive + .sig
+#   launcher/<version>/IdleOT-x86_64.AppImage  Linux (also its own update) + .sig
+#   .idleot/launcher.json                      installers (/download) + updater signatures
+#
+# bundle.yml turns the slice into latest/desktop.json and launcher/latest.json.
+# Slices are keyed by apps/launcher/package.json "version": bump it to ship a
+# launcher; an existing :<version> is never rebuilt.
+#
+# Same privacy rules as build-client.yml: build output goes to files and logs
+# show only an error summary.
+#
+# Secrets (release environment):
+#   TAURI_SIGNING_PRIVATE_KEY (required), TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#     (optional) — sign the updater artifacts; the public key is in tauri.conf.json.
+#   Windows / macOS code signing: the optional secrets build-client.yml uses
+#     (Azure Trusted Signing; Developer ID + notarization). Unsigned / ad-hoc otherwise.
+name: Build launcher
+
+run-name: Build launcher ${{ inputs.portal_sha }} ${{ inputs.release_id }}
+
+on:
+  workflow_call:
+    inputs:
+      portal_sha:
+        type: string
+        required: true
+      release_id:
+        type: string
+        default: ""
+    outputs:
+      version:
+        value: ${{ jobs.check.outputs.version }}
+  workflow_dispatch:
+    inputs:
+      portal_sha:
+        description: idleot/portal commit SHA (full)
+        required: true
+      release_id:
+        description: Correlation id (set by release.yml)
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  SHA: ${{ inputs.portal_sha }}
+
+jobs:
+  check:
+    name: Check existing slice
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      exists: ${{ steps.version.outputs.exists }}
+    steps:
+      - name: Checkout launcher manifest
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/portal
+          ref: ${{ env.SHA }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: false
+          sparse-checkout: apps/launcher/package.json
+          sparse-checkout-cone-mode: false
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Version and :version tag
+        id: version
+        run: |
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::portal_sha must be a full commit SHA"; exit 1; }
+          version="$(jq -r .version apps/launcher/package.json)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad launcher version '$version'"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$REGISTRY/launcher:$version" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"; echo "launcher:$version exists — skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Launcher (${{ matrix.platform }})
+    needs: [check]
+    if: needs.check.outputs.exists != 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Oldest supported glibc for the AppImage.
+          - platform: linux-x64
+            os: ubuntu-22.04
+          - platform: windows-x64
+            os: windows-2025
+          - platform: macos-arm64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    environment: release
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      PLATFORM: ${{ matrix.platform }}
+      WINDOWS_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
+      MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+      # Baked into the binary (option_env!); runtime IDLEOT_* env still overrides.
+      IDLEOT_PORTAL_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+      IDLEOT_CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
+    steps:
+      - name: Checkout portal
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/portal
+          ref: ${{ env.SHA }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libfuse2 >/dev/null
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Third-party crates only (workspace crates are not cached by default).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/launcher/src-tauri
+          key: launcher-${{ matrix.platform }}
+
+      - name: Install trusted-signing-cli
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING == 'true'
+        run: cargo install trusted-signing-cli --locked --quiet
+
+      - name: Install dependencies
+        shell: bash
+        run: bun install --frozen-lockfile > "$RUNNER_TEMP/install.log" 2>&1 || { tail -n 40 "$RUNNER_TEMP/install.log"; exit 1; }
+
+      - name: Build bundles (quiet)
+        shell: bash
+        working-directory: apps/launcher
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          TRUSTED_SIGNING_PROFILE: ${{ vars.TRUSTED_SIGNING_PROFILE }}
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_APPLE_ID: ${{ secrets.APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MACOS_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" ]] || { echo "::error::set the TAURI_SIGNING_PRIVATE_KEY secret"; exit 1; }
+          args=()
+          if [[ "$WINDOWS_SIGNING" == true ]]; then
+            # Signing inside the build keeps the updater .sig valid for the signed installer.
+            args+=(--config "$(jq -nc --arg e "$TRUSTED_SIGNING_ENDPOINT" --arg a "$TRUSTED_SIGNING_ACCOUNT" \
+              --arg c "$TRUSTED_SIGNING_PROFILE" \
+              '{bundle:{windows:{signCommand:{cmd:"trusted-signing-cli",args:["-e",$e,"-a",$a,"-c",$c,"-d","IdleOT","%1"]}}}}')")
+          fi
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            if [[ "$MACOS_SIGNING" == true ]]; then
+              export APPLE_CERTIFICATE="$MACOS_CERTIFICATE_P12"
+              export APPLE_CERTIFICATE_PASSWORD="$MACOS_CERTIFICATE_PASSWORD"
+              export APPLE_SIGNING_IDENTITY="$MACOS_SIGN_IDENTITY"
+              export APPLE_ID="$MACOS_APPLE_ID" APPLE_TEAM_ID="$MACOS_TEAM_ID" APPLE_PASSWORD="$MACOS_APP_PASSWORD"
+            else
+              export APPLE_SIGNING_IDENTITY="-"
+            fi
+          fi
+          if ! bun run tauri build "${args[@]}" > "$RUNNER_TEMP/build.log" 2>&1; then
+            echo "::group::error summary"
+            grep -E "(error|Error|FAILED|failed)" "$RUNNER_TEMP/build.log" | cut -c1-400 | tail -n 60
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          b=apps/launcher/src-tauri/target/release/bundle
+          dest="$RUNNER_TEMP/out/launcher/$VERSION"
+          mkdir -p "$dest" "$RUNNER_TEMP/out/parts"
+          pick() {
+            local f
+            f="$(compgen -G "$1" | head -n1 || true)"
+            [[ -n "$f" ]] || { echo "::error::no bundle matches $1"; exit 1; }
+            echo "$f"
+          }
+          case "$PLATFORM" in
+            windows-x64)
+              src="$(pick "$b/nsis/*-setup.exe")"
+              installer=IdleOT-Setup.exe format=exe updater=IdleOT-Setup.exe
+              cp "$src" "$dest/$installer"; cp "$src.sig" "$dest/$updater.sig" ;;
+            macos-arm64)
+              installer=IdleOT.dmg format=dmg updater=IdleOT.app.tar.gz
+              cp "$(pick "$b/dmg/*.dmg")" "$dest/$installer"
+              cp "$b/macos/IdleOT.app.tar.gz" "$dest/$updater"
+              cp "$b/macos/IdleOT.app.tar.gz.sig" "$dest/$updater.sig" ;;
+            linux-x64)
+              src="$(pick "$b/appimage/*.AppImage")"
+              installer=IdleOT-x86_64.AppImage format=appimage updater=IdleOT-x86_64.AppImage
+              cp "$src" "$dest/$installer"; cp "$src.sig" "$dest/$updater.sig" ;;
+          esac
+          INSTALLER="$installer" FORMAT="$format" UPDATER="$updater" DEST="$dest" python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          dest = pathlib.Path(os.environ["DEST"])
+          inst = dest / os.environ["INSTALLER"]
+          upd = os.environ["UPDATER"]
+          part = {
+              "installer": {
+                  "file": inst.name,
+                  "format": os.environ["FORMAT"],
+                  "size": inst.stat().st_size,
+                  "sha256": hashlib.sha256(inst.read_bytes()).hexdigest(),
+              },
+              "updater": {"file": upd, "signature": (dest / f"{upd}.sig").read_text().strip()},
+          }
+          out = dest.parent.parent / "parts" / f"{os.environ['PLATFORM']}.json"
+          out.write_text(json.dumps(part, indent=2) + "\n")
+          print(f"{os.environ['PLATFORM']}: {inst.name} {part['installer']['size']} bytes")
+          PY
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-${{ matrix.platform }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Push launcher
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: launcher-*
+          path: slice
+          merge-multiple: true
+
+      - name: Write slice pointer
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib
+          root = pathlib.Path("slice")
+          version, sha = os.environ["VERSION"], os.environ["SHA"]
+          platforms, updater = {}, {}
+          for name in ("windows-x64", "macos-arm64", "linux-x64"):
+              part = json.loads((root / "parts" / f"{name}.json").read_text())
+              inst = part["installer"]
+              platforms[name] = {**inst, "url": f"launcher/{version}/{inst['file']}"}
+              updater[name] = {
+                  "url": f"launcher/{version}/{part['updater']['file']}",
+                  "signature": part["updater"]["signature"],
+              }
+          pointer = {
+              "schema": 2,
+              "version": version,
+              "revision": version,
+              "productSha": sha,
+              "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": platforms,
+              "updater": updater,
+          }
+          (root / ".idleot").mkdir(exist_ok=True)
+          (root / ".idleot" / "launcher.json").write_text(json.dumps(pointer, indent=2) + "\n")
+          print(json.dumps({k: v for k, v in pointer.items() if k != "updater"}, indent=2))
+          PY
+          rm -rf slice/parts
+          printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push launcher:${{ env.VERSION }}
+        uses: docker/build-push-action@v6
+        with:
+          context: slice
+          file: Dockerfile.slice
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/launcher:${{ env.VERSION }}

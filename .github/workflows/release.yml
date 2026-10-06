@@ -2,14 +2,15 @@
 # Release orchestrator. An idleot/idleot tag (v*) dispatches this with the tag
 # as `ref`; the umbrella's submodule pointers decide what ships.
 #
-#   resolve -> build client / server / portal (parallel, skipped if :sha exists)
+#   resolve -> build client / server / portal / launcher (parallel, skipped if built)
 #           -> deploy server + portal (only once every build succeeded)
 #           -> promote client (CDN bundle with the exact slice tags) -> deploy cdn
 #           -> move :latest to what is live, GitHub Release on the umbrella tag
 #
 # components: auto (submodule changes since the previous v* tag, or all when the
 # tag annotation contains [release:all]) | all | client | server | portal |
-# server+portal | assets (re-bundle live client with the newest cdn-assets).
+# launcher | server+portal | assets (re-bundle live client with the newest cdn-assets).
+# The launcher ships when the pinned portal's apps/launcher version changed.
 # `aac` is still accepted as an alias for `portal`.
 # skip_build redeploys existing images — use it with an older tag to roll back.
 name: Release
@@ -26,7 +27,7 @@ on:
         description: What to release
         type: choice
         default: auto
-        options: [auto, all, client, server, portal, server+portal, assets, aac, server+aac]
+        options: [auto, all, client, server, portal, launcher, server+portal, assets, aac, server+aac]
       skip_build:
         description: Redeploy existing images only (rollback)
         type: boolean
@@ -59,6 +60,7 @@ jobs:
       client: ${{ steps.pins.outputs.client }}
       server: ${{ steps.pins.outputs.server }}
       portal: ${{ steps.pins.outputs.portal }}
+      launcher: ${{ steps.pins.outputs.launcher }}
       promote: ${{ steps.pins.outputs.promote }}
       build: ${{ steps.pins.outputs.build }}
       is_tag: ${{ steps.pins.outputs.is_tag }}
@@ -90,6 +92,16 @@ jobs:
     secrets: inherit
     with:
       otclient_sha: ${{ needs.resolve.outputs.otclient_sha }}
+      release_id: ${{ needs.resolve.outputs.release_id }}
+
+  build-launcher:
+    name: Build launcher
+    needs: [resolve]
+    if: needs.resolve.outputs.launcher == 'true' && needs.resolve.outputs.build == 'true'
+    uses: ./.github/workflows/build-launcher.yml
+    secrets: inherit
+    with:
+      portal_sha: ${{ needs.resolve.outputs.portal_sha }}
       release_id: ${{ needs.resolve.outputs.release_id }}
 
   build-server:
@@ -128,7 +140,7 @@ jobs:
   # build never leaves a new server running against old clients.
   deploy-server:
     name: Deploy server
-    needs: [resolve, build-client, build-server, build-portal]
+    needs: [resolve, build-client, build-launcher, build-server, build-portal]
     if: >-
       always() && needs.resolve.outputs.server == 'true' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
@@ -168,7 +180,7 @@ jobs:
 
   deploy-portal:
     name: Deploy portal
-    needs: [resolve, build-client, build-server, build-portal]
+    needs: [resolve, build-client, build-launcher, build-server, build-portal]
     if: >-
       always() && needs.resolve.outputs.portal == 'true' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
@@ -200,7 +212,7 @@ jobs:
 
   promote:
     name: Promote client
-    needs: [resolve, build-client, deploy-server, deploy-portal]
+    needs: [resolve, build-client, build-launcher, deploy-server, deploy-portal]
     if: >-
       always() && needs.resolve.outputs.promote == 'true' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
@@ -209,6 +221,7 @@ jobs:
     with:
       wasm_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
       desktop_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
+      launcher_tag: ${{ needs.build-launcher.outputs.version || 'latest' }}
       release_id: ${{ needs.resolve.outputs.release_id }}
 
   deploy-cdn:
@@ -241,7 +254,7 @@ jobs:
 
   finalize:
     name: Finalize
-    needs: [resolve, build-client, deploy-server, deploy-portal, promote, deploy-cdn]
+    needs: [resolve, build-client, build-launcher, deploy-server, deploy-portal, promote, deploy-cdn]
     if: >-
       always() && needs.resolve.result == 'success' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
@@ -264,6 +277,7 @@ jobs:
           BUNDLE_TAG: ${{ needs.promote.outputs.tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
           OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
+          LAUNCHER_VERSION: ${{ needs.build-launcher.outputs.version }}
         run: |
           retag() { docker buildx imagetools create -t "$REGISTRY/$1:latest" "$REGISTRY/$1:$2" && echo "$1:$2 -> latest"; }
           [[ "$SERVER" == success ]] && retag crystalserver "$CRYSTAL_SHA"
@@ -272,6 +286,7 @@ jobs:
               retag otclient-wasm "$OTC_SHA"
               retag otclient-desktop "$OTC_SHA"
             fi
+            [[ -n "$LAUNCHER_VERSION" ]] && retag launcher "$LAUNCHER_VERSION"
             retag cdn "$BUNDLE_TAG"
           fi
           true
@@ -294,10 +309,11 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           REF: ${{ needs.resolve.outputs.ref }}
         run: |
-          notes="$(printf 'otclient %s\ncrystalserver %s\nportal %s\nclient=%s server=%s portal=%s cdn=%s\nrun %s/%s/actions/runs/%s\n' \
+          notes="$(printf 'otclient %s\ncrystalserver %s\nportal %s\nclient=%s server=%s portal=%s launcher=%s cdn=%s\nrun %s/%s/actions/runs/%s\n' \
             "${{ needs.resolve.outputs.otclient_sha }}" "${{ needs.resolve.outputs.crystalserver_sha }}" \
             "${{ needs.resolve.outputs.portal_sha }}" "${{ needs.resolve.outputs.client }}" \
-            "${{ needs.resolve.outputs.server }}" "${{ needs.resolve.outputs.portal }}" "${{ needs.promote.outputs.tag }}" \
+            "${{ needs.resolve.outputs.server }}" "${{ needs.resolve.outputs.portal }}" \
+            "${{ needs.build-launcher.outputs.version || 'unchanged' }}" "${{ needs.promote.outputs.tag }}" \
             "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
           gh release create "$REF" -R "${{ github.repository_owner }}/idleot" --verify-tag --title "$REF" --notes "$notes" >/dev/null \
             || gh release edit "$REF" -R "${{ github.repository_owner }}/idleot" --notes "$notes" >/dev/null

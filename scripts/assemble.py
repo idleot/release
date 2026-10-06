@@ -6,10 +6,14 @@ Inputs (directories extracted from images; any may be missing):
   --wasm      otclient-wasm slice   (client/<rev>/wasm/*, .idleot/wasm.json)
   --desktop   otclient-desktop slice (desktop/<rev>/{installers,files/}, .idleot/{desktop,update}.json)
   --assets    cdn-assets slice      (assets/{things,store,outfits,items}/*, .idleot/assets.json)
+  --launcher  launcher slice        (launcher/<version>/*, .idleot/launcher.json)
 
-Output tree (every manifest URL is relative to the bundle root):
+Output tree (every manifest URL is relative to the bundle root, except
+launcher/latest.json — the Tauri updater needs absolute URLs, see --cdn-url):
   latest/client-version.json
-  latest/desktop.json          installers per platform
+  latest/desktop.json          installers per platform (the launcher's once it is published)
+  launcher/latest.json         Tauri updater manifest (signed artifacts in launcher/<version>/)
+  launcher/<version>/...       last --keep-launcher versions
   latest/update.json           in-client updater manifest (desktop/<rev>/files/)
   latest/sources.json          pointers + revision history (drives pruning)
   latest/release.json          v3 launcher / client-sync manifest (targets -> releases/<rev>/*.json)
@@ -137,6 +141,38 @@ def finish_v3(out: Path, release: dict, history: list[str]) -> None:
         print("[assemble] warning: no v3 targets — latest/release.json omitted", file=sys.stderr)
 
 
+# Release target -> tauri-plugin-updater platform key.
+TAURI_PLATFORMS = {"windows-x64": "windows-x86_64", "macos-arm64": "darwin-aarch64", "linux-x64": "linux-x86_64"}
+
+
+def launcher_manifests(out: Path, launcher: dict, cdn_url: str) -> dict | None:
+    """Write launcher/latest.json for the published launcher; returns its desktop.json, or None if incomplete."""
+    files = [p["url"] for p in launcher.get("platforms", {}).values()]
+    files += [u["url"] for u in launcher.get("updater", {}).values()]
+    if not files or not all((out / f).is_file() for f in files):
+        print(f"[assemble] warning: launcher {launcher.get('version')} files missing — not published",
+              file=sys.stderr)
+        return None
+    write_json(out / "launcher" / "latest.json", {
+        "version": launcher["version"],
+        "notes": launcher.get("notes", ""),
+        "pub_date": launcher.get("publishedAt", ""),
+        "platforms": {
+            TAURI_PLATFORMS[name]: {"signature": u["signature"], "url": f"{cdn_url}/{u['url']}"}
+            for name, u in launcher["updater"].items() if name in TAURI_PLATFORMS
+        },
+    })
+    return {
+        "schema": 2,
+        "kind": "launcher",
+        "revision": launcher["version"],
+        "version": launcher["version"],
+        "productSha": launcher.get("productSha", ""),
+        "publishedAt": launcher.get("publishedAt", ""),
+        "platforms": launcher["platforms"],
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True)
@@ -144,10 +180,15 @@ def main() -> int:
     ap.add_argument("--wasm")
     ap.add_argument("--desktop")
     ap.add_argument("--assets")
+    ap.add_argument("--launcher")
+    ap.add_argument("--cdn-url", default="https://cdn.idleot.com",
+                    help="public bundle root (absolute URLs in launcher/latest.json)")
     ap.add_argument("--keep-wasm", type=int, default=3)
     ap.add_argument("--keep-desktop", type=int, default=2)
     ap.add_argument("--keep-releases", type=int, default=3)
+    ap.add_argument("--keep-launcher", type=int, default=2)
     args = ap.parse_args()
+    cdn_url = args.cdn_url.rstrip("/")
 
     out = Path(args.out)
     if out.exists():
@@ -158,6 +199,7 @@ def main() -> int:
     wasm = slice_dir(args.wasm)
     desktop = slice_dir(args.desktop)
     assets = slice_dir(args.assets)
+    launcher_slice = slice_dir(args.launcher)
 
     prev_sources = (load_json(previous / "latest" / "sources.json") if previous else None) or {}
     sources: dict = {
@@ -165,11 +207,12 @@ def main() -> int:
         "desktop": prev_sources.get("desktop"),
         "update": prev_sources.get("update"),
         "assets": prev_sources.get("assets"),
+        "launcher": prev_sources.get("launcher"),
         "history": prev_sources.get("history") or {"wasm": [], "desktop": []},
     }
 
     if previous:
-        for name in ("client", "desktop", "assets", "releases", "content"):
+        for name in ("client", "desktop", "assets", "releases", "content", "launcher"):
             copy_tree(previous / name, out / name)
 
     prev_release = (load_json(previous / "latest" / "release.json") if previous else None) or {}
@@ -203,6 +246,9 @@ def main() -> int:
         shutil.rmtree(out / "assets", ignore_errors=True)
         copy_tree(assets / "assets", out / "assets")
         sources["assets"] = load_json(assets / ".idleot" / "assets.json") or sources["assets"]
+    if launcher_slice:
+        copy_tree(launcher_slice / "launcher", out / "launcher")
+        sources["launcher"] = load_json(launcher_slice / ".idleot" / "launcher.json") or sources["launcher"]
 
     history = sources["history"]
     history["wasm"] = remember(history.get("wasm", []), (sources["wasm"] or {}).get("revision"), args.keep_wasm)
@@ -213,8 +259,19 @@ def main() -> int:
     for rev in sorted(new_revisions):
         releases = remember(releases, rev, args.keep_releases)
     history["releases"] = releases
+    history["launcher"] = remember(
+        history.get("launcher", []), (sources["launcher"] or {}).get("version"), args.keep_launcher
+    )
     prune(out / "client", history["wasm"])
     prune(out / "desktop", history["desktop"])
+    prune(out / "launcher", history["launcher"])
+
+    (out / "launcher" / "latest.json").unlink(missing_ok=True)
+    launcher_desktop = launcher_manifests(out, sources["launcher"], cdn_url) if sources["launcher"] else None
+    if launcher_desktop:
+        release["launcher"] = {"version": launcher_desktop["version"]}
+    else:
+        release.pop("launcher", None)
     finish_v3(out, release, history["releases"])
 
     w = sources["wasm"]
@@ -243,7 +300,9 @@ def main() -> int:
         print("[assemble] warning: no WASM slice — latest/client-version.json omitted", file=sys.stderr)
 
     d = sources["desktop"]
-    if d and all((out / p["url"]).is_file() for p in d.get("platforms", {}).values()):
+    if launcher_desktop:
+        write_json(out / "latest" / "desktop.json", launcher_desktop)
+    elif d and all((out / p["url"]).is_file() for p in d.get("platforms", {}).values()):
         write_json(out / "latest" / "desktop.json", {
             "schema": d.get("schema", 1),
             "revision": d["revision"],
