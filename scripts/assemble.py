@@ -182,7 +182,9 @@ def main() -> int:
         release["launcher"] = prev_release["launcher"]
     new_revisions = [r for s in (wasm, desktop) if s for r in import_v3(s, out, release["targets"])]
     if new_revisions:
-        release["revision"] = max(new_revisions)
+        # Desktop revisions are dated (YYYYMMDD-sha); WASM ones are content hashes.
+        lead = release["targets"].get("desktop") or release["targets"].get("web") or {}
+        release["revision"] = list_paths(lead).split("/")[1] if list_paths(lead) else new_revisions[0]
 
     if wasm:
         copy_tree(wasm / "client", out / "client")
@@ -218,16 +220,25 @@ def main() -> int:
     w = sources["wasm"]
     if w and (out / "client" / w["revision"] / "wasm" / "otclient.js").is_file():
         rev = w["revision"]
-        write_json(out / "latest" / "client-version.json", {
+        wasm_files = {
+            "js": f"client/{rev}/wasm/otclient.js",
+            "wasm": f"client/{rev}/wasm/otclient.wasm",
+        }
+        # Builds before the v3 content store bake the runtime into otclient.data.
+        if (out / "client" / rev / "wasm" / "otclient.data").is_file():
+            wasm_files["data"] = f"client/{rev}/wasm/otclient.data"
+        manifest = {
             "revision": rev,
             "productSha": w.get("productSha", ""),
             "assetsRevision": (sources["assets"] or {}).get("assetsRevision", ""),
-            "wasm": {
-                "js": f"client/{rev}/wasm/otclient.js",
-                "wasm": f"client/{rev}/wasm/otclient.wasm",
-                "data": f"client/{rev}/wasm/otclient.data",
-            },
-        })
+            "wasm": wasm_files,
+        }
+        web = release["targets"].get("web")
+        if web and web.get("content") == f"releases/{rev}/content-web.json":
+            manifest["content"] = web["content"]
+        elif "data" not in wasm_files:
+            print(f"[assemble] warning: WASM {rev} has neither otclient.data nor content-web", file=sys.stderr)
+        write_json(out / "latest" / "client-version.json", manifest)
     else:
         print("[assemble] warning: no WASM slice — latest/client-version.json omitted", file=sys.stderr)
 
