@@ -48,7 +48,7 @@ client env), or by pointing the `cdn.idleot.com` DNS at Pages.
 
 | Name | Kind | Purpose |
 |------|------|---------|
-| `GHCR_TOKEN` | secret | read producer packages + push `cdn` |
+| `GHCR_TOKEN` | secret | classic PAT, `read:packages` only — pull the slice images (`cdn` is pushed with `GITHUB_TOKEN`) |
 | `COOLIFY_URL`, `COOLIFY_TOKEN` | secret | image target deploy |
 | `COOLIFY_CDN_UUID` | variable | Coolify `idleot-cdn` application |
 | `IDLEOT_CDN_TARGETS` | variable | `image` / `pages` / `image,pages` |
