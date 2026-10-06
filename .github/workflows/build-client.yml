@@ -275,6 +275,15 @@ jobs:
           path: .vcpkg-bincache
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
+      - name: Stage runtime into app bundle
+        if: runner.os == 'macOS'
+        env:
+          IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://cdn.idleot.com' }}
+          OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
+          OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
+        run: python3 tools/publish/package_desktop.py --platform macos-arm64 --bin "build/${{ matrix.preset }}/bin" --stage-bundle
+
       - name: Ad-hoc sign app bundle
         if: runner.os == 'macOS'
         run: |
