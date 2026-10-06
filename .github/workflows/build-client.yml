@@ -180,6 +180,7 @@ jobs:
       VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/.vcpkg-bincache,readwrite"
       CFLAGS: ${{ matrix.cflags }}
       CXXFLAGS: ${{ matrix.cflags }}
+      PYTHONUTF8: "1"
     steps:
       - name: Checkout otclient
         uses: actions/checkout@v5
