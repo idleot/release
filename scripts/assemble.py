@@ -4,21 +4,20 @@
 Inputs (directories extracted from images; any may be missing):
   --previous  tree of the last ghcr.io/idleot/cdn image (/usr/share/nginx/html)
   --wasm      otclient-wasm slice   (client/<rev>/wasm/*, .idleot/wasm.json)
-  --desktop   otclient-desktop slice (desktop/<rev>/{installers,files/}, .idleot/{desktop,update}.json)
+  --desktop   otclient-desktop slice (engine-<platform> + content-desktop lists)
   --assets    cdn-assets slice      (assets/{store,outfits,items}/*, content-things list, .idleot/assets.json)
   --launcher  launcher slice        (launcher/<version>/*, .idleot/launcher.json)
 
 Output tree (every manifest URL is relative to the bundle root, except
 launcher/latest.json — the Tauri updater needs absolute URLs, see --cdn-url):
   latest/client-version.json   live web revision (portal login needUpdate check)
-  latest/desktop.json          installers per platform (the launcher's once it is published)
+  latest/desktop.json          launcher installers per platform (/download)
   launcher/latest.json         Tauri updater manifest (signed artifacts in launcher/<version>/)
   launcher/<version>/...       last --keep-launcher versions
-  latest/update.json           in-client updater manifest (desktop/<rev>/files/)
+  latest/update.json           fixed: sends pre-launcher installs to /download
   latest/sources.json          pointers + revision history (drives pruning)
   latest/release.json          v3 launcher / client-sync manifest (targets -> releases/<rev>/*.json)
   client/<rev>/wasm/...        last --keep-wasm revisions (targets.web.wasm)
-  desktop/<rev>/...            last --keep-desktop revisions
   releases/<rev>/*.json        v3 file lists, last --keep-releases revisions (+ any still in latest)
   content/<aa>/<sha256>        blobs referenced by the kept releases/ lists
   packs/<aa>/<sha256>.zip      zip packs of those blobs (list "packs")
@@ -39,6 +38,9 @@ import shutil
 import sys
 from pathlib import Path
 
+# Installs from before the launcher poll this; a foreign engine makes them offer
+# a reinstall from their download page (now the launcher). url/files are required.
+RETIRED_UPDATE = {"schema": 1, "revision": "launcher", "engine": "launcher", "url": "launcher/", "files": {}}
 
 def load_json(path: Path) -> dict | None:
     try:
@@ -232,7 +234,6 @@ def main() -> int:
     ap.add_argument("--cdn-url", default="https://cdn.idleot.com",
                     help="public bundle root (absolute URLs in launcher/latest.json)")
     ap.add_argument("--keep-wasm", type=int, default=3)
-    ap.add_argument("--keep-desktop", type=int, default=2)
     ap.add_argument("--keep-releases", type=int, default=3)
     ap.add_argument("--keep-launcher", type=int, default=2)
     args = ap.parse_args()
@@ -252,15 +253,13 @@ def main() -> int:
     prev_sources = (load_json(previous / "latest" / "sources.json") if previous else None) or {}
     sources: dict = {
         "wasm": prev_sources.get("wasm"),
-        "desktop": prev_sources.get("desktop"),
-        "update": prev_sources.get("update"),
         "assets": prev_sources.get("assets"),
         "launcher": prev_sources.get("launcher"),
-        "history": prev_sources.get("history") or {"wasm": [], "desktop": []},
+        "history": prev_sources.get("history") or {"wasm": []},
     }
 
     if previous:
-        for name in ("client", "desktop", "assets", "releases", "content", "packs", "launcher"):
+        for name in ("client", "assets", "releases", "content", "packs", "launcher"):
             copy_tree(previous / name, out / name)
 
     prev_release = (load_json(previous / "latest" / "release.json") if previous else None) or {}
@@ -280,15 +279,7 @@ def main() -> int:
     if wasm:
         copy_tree(wasm / "client", out / "client")
         sources["wasm"] = load_json(wasm / ".idleot" / "wasm.json") or sources["wasm"]
-    if desktop:
-        copy_tree(desktop / "desktop", out / "desktop")
-        sources["desktop"] = load_json(desktop / ".idleot" / "desktop.json") or sources["desktop"]
-    update = load_json(desktop / ".idleot" / "update.json") if desktop else None
-    if update is None and previous:
-        update = load_json(previous / "latest" / "update.json")
-    if update:
-        write_json(out / "latest" / "update.json", update)
-        sources["update"] = {"revision": update.get("revision"), "engine": update.get("engine")}
+    write_json(out / "latest" / "update.json", RETIRED_UPDATE)
     things = next((t["things"] for t in prev_release.get("targets", {}).values() if t.get("things")), None)
     if assets:
         # The assets slice is authoritative for assets/.
@@ -308,9 +299,7 @@ def main() -> int:
 
     history = sources["history"]
     history["wasm"] = remember(history.get("wasm", []), (sources["wasm"] or {}).get("revision"), args.keep_wasm)
-    history["desktop"] = remember(
-        history.get("desktop", []), (sources["desktop"] or {}).get("revision"), args.keep_desktop
-    )
+    history.pop("desktop", None)
     releases = history.get("releases", [])
     for rev in sorted(new_revisions):
         releases = remember(releases, rev, args.keep_releases)
@@ -319,7 +308,6 @@ def main() -> int:
         history.get("launcher", []), (sources["launcher"] or {}).get("version"), args.keep_launcher
     )
     prune(out / "client", history["wasm"])
-    prune(out / "desktop", history["desktop"])
     prune(out / "launcher", history["launcher"])
 
     (out / "launcher" / "latest.json").unlink(missing_ok=True)
@@ -346,26 +334,10 @@ def main() -> int:
     else:
         print("[assemble] warning: no web target — latest/client-version.json omitted", file=sys.stderr)
 
-    d = sources["desktop"]
     if launcher_desktop:
         write_json(out / "latest" / "desktop.json", launcher_desktop)
-    elif d and all((out / p["url"]).is_file() for p in d.get("platforms", {}).values()):
-        write_json(out / "latest" / "desktop.json", {
-            "schema": d.get("schema", 1),
-            "revision": d["revision"],
-            "engine": d.get("engine", ""),
-            "productSha": d.get("productSha", ""),
-            "publishedAt": d.get("publishedAt", ""),
-            "platforms": d.get("platforms", {}),
-        })
     else:
-        print("[assemble] warning: no desktop slice — latest/desktop.json omitted", file=sys.stderr)
-
-    u = load_json(out / "latest" / "update.json")
-    if u and not (out / u.get("url", "")).is_dir():
-        # Pruned or missing tree: clients would 404 on every file; drop the manifest.
-        print(f"[assemble] warning: {u.get('url')} missing — latest/update.json omitted", file=sys.stderr)
-        (out / "latest" / "update.json").unlink()
+        print("[assemble] warning: no launcher published — latest/desktop.json omitted", file=sys.stderr)
 
     if not any(t.get("things") for t in release["targets"].values()):
         print("[assemble] warning: no assets slice — targets carry no things list", file=sys.stderr)

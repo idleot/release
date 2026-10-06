@@ -46,8 +46,8 @@ This repo is public; the engines are not.
 - Compiler output is written to files; logs show only an error summary
   (`-w`, no carets). Cross-repo builds report only their conclusion.
 - No layer or compiler caches of product code; only third-party vcpkg/emsdk.
-- Artifacts are only the encrypted desktop installers + updater file tree the
-  CDN serves anyway (1-day retention). Slice and bundle images are private
+- Artifacts are only the encrypted desktop content store the CDN serves
+  anyway (1-day retention). Slice and bundle images are private
   GHCR packages.
 - No `pull_request` workflows; outside contributors need approval; the default
   token is read-only; secrets live in the `release` environment (main only).
@@ -57,19 +57,18 @@ This repo is public; the engines are not.
 All URLs inside manifests are relative to the bundle root.
 
 ```
-latest/client-version.json   WASM revision + relative js/wasm/data paths
-latest/desktop.json          schema 2; per-platform url/file/format/size/sha256 (launcher installers once published)
-latest/update.json           in-client updater: {revision, engine, url, files{path: crc32}}
+latest/client-version.json   {revision, productSha, assetsRevision} (portal login needUpdate check)
+latest/desktop.json          schema 2, kind "launcher": per-platform launcher installer url/file/format/size/sha256
+latest/update.json           fixed {engine: "launcher"}: pre-launcher installs offer a reinstall from /download
 latest/sources.json          producer pointers + revision history (pruning)
-latest/release.json          schema 3: targets.{web,desktop}.content / targets.<platform>.files
-releases/<rev>/*.json        v3 file lists {revision, engine, entry?, files{path: {sha256, size, exec?}}}
+latest/release.json          schema 3: targets.{web,desktop}.{content,things} / targets.<platform>.files, web.wasm
+releases/<rev>/*.json        v3 file lists {revision, engine, entry?, files{path: {sha256, size, exec?}}, packs?}
+releases/things-<rev>/content-things.json   sprites (data/things/<version>), merged into web/desktop by client-sync
 content/<aa>/<sha256>        content-addressed blobs (immutable; pruned with releases/)
-client/<rev>/wasm/otclient.{js,wasm,data}[.gz|.br]   last 3 revisions
-desktop/<rev>/IdleOT-Setup.exe | IdleOT.dmg | IdleOT-x86_64.AppImage   last 2 revisions
-desktop/<rev>/files/...      encrypted runtime tree the updater patches from
+packs/<aa>/<sha256>.zip      ~16 MB zips of list blobs (one round trip for cold installs)
+client/<rev>/wasm/otclient.{js,wasm}[.gz|.br]   last 3 revisions
 launcher/latest.json         Tauri updater manifest (absolute URLs, minisign signatures)
 launcher/<version>/IdleOT-Setup.exe | IdleOT.dmg | IdleOT.app.tar.gz | IdleOT-x86_64.AppImage (+ .sig)   last 2 versions
-assets/things/manifest.json + things-<version>.zip
 assets/store/...             store icons (Crystal coinImagesURL; committed in portal apps/web)
 assets/outfits/manifest.json + <rev>/<looktype>/...   portal outfit frames (rendered by make extract)
 assets/items/manifest.json + <rev>/<id>.png           portal item sprites (rendered by make extract)
@@ -79,14 +78,14 @@ healthz
 | Slice | Image | Built by |
 |-------|-------|----------|
 | WASM | `ghcr.io/idleot/otclient-wasm:<otclient sha>` | `build-client.yml` |
-| Desktop installers + update tree + v3 engine/content lists and blobs | `ghcr.io/idleot/otclient-desktop:<otclient sha>` | `build-client.yml` |
+| v3 engine/content lists, blobs and packs | `ghcr.io/idleot/otclient-desktop:<otclient sha>` | `build-client.yml` |
 | Launcher installers + signed update artifacts | `ghcr.io/idleot/launcher:<version>` | `build-launcher.yml` (Tauri, from `idleot/portal` `apps/launcher`) |
-| Things + store + outfits + items | `ghcr.io/idleot/cdn-assets` | local `make -C apps/otclient publish-assets ARGS=--push` (CIP files never touch CI) |
+| Things (content-things list) + store + outfits + items | `ghcr.io/idleot/cdn-assets` | local `make -C apps/otclient publish-assets ARGS=--push` (CIP files never touch CI) |
 
 Targets — repository variable `IDLEOT_CDN_TARGETS`: `image` (default), `pages`,
 or `image,pages`. **image**: Coolify `idleot-cdn` runs `ghcr.io/idleot/cdn:<tag>`.
 **pages**: the same tree on GitHub Pages (1 GB cap, no custom headers, makes the
-things zip public; WASM still loads through the portal same-origin `/cdn` proxy).
+things blobs public; WASM still loads through the portal same-origin `/cdn` proxy).
 
 ## Setup
 
@@ -102,16 +101,17 @@ things zip public; WASM still loads through the portal same-origin `/cdn` proxy)
 | `MACOS_CERTIFICATE_P12` (base64), `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | `release` env secret (optional) | macOS Developer ID signing + notarization of the client and launcher; ad-hoc when absent |
 | `IDLEOT_SITE_URL`, `IDLEOT_CDN_URL` | `release` env variable (optional) | portal / CDN origins baked into the launcher and `launcher/latest.json` (default production) |
 
-## Desktop installers and updates
+## Desktop launcher
 
-Windows ships an Inno Setup installer (per-user, no admin), macOS a DMG
-(drag `IdleOT.app` to Applications), Linux an AppImage. Installed clients run
-`modules/custom/idleot_updater` before boot: while `latest/update.json`'s
-`engine` (hash of the otclient native sources) matches the install, changed
-Lua/OTUI/data files are downloaded into the user write dir (`update/<engine>/`,
-mounted ahead of the read-only install) and the client restarts; when the engine
-changed, the client points players to `/download` for the new installer.
-Files removed from the runtime keep existing in older installs until reinstall.
+The IdleOT launcher (`build-launcher.yml`) is the only desktop installer:
+Windows NSIS (per-user), macOS DMG, Linux AppImage, listed by `/download`
+from `latest/desktop.json`. It updates itself from `launcher/latest.json` and
+installs/updates the game (engine + `content-desktop` + `content-things`) from
+`latest/release.json`, the same lists the browser `/play` syncs. Release game
+builds (`release_env.lua` `IDLEOT_REVISION`) refuse to start outside the
+launcher and send players to `/download`. Installs from before the launcher
+read the fixed `latest/update.json`, whose foreign engine makes them offer the
+same reinstall.
 
 Every private package (`otclient-wasm`, `otclient-desktop`, `launcher`, `cdn`,
 `cdn-assets`, `crystalserver`) grants this repo **Actions access:

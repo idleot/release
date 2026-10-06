@@ -8,10 +8,11 @@
 #   - Lua/OTUI ship encrypted (OTC_ENCRYPTION_* secrets, encrypt_assets.py).
 #   - Compiler output goes to files; logs show only an error summary.
 #   - No layer/compiler caches of product code; only third-party vcpkg/emsdk.
-#   - Artifacts hold only the encrypted installers + updater file tree the CDN
-#     publishes anyway.
+#   - Artifacts hold only the encrypted content store the CDN publishes anyway.
 #
-# Desktop installers: Windows Inno Setup (per-user), macOS DMG, Linux AppImage.
+# Desktop: the engine per platform + the runtime tree (once, from Linux) go into
+# the launcher content store (package_desktop.py). The IdleOT launcher
+# (build-launcher.yml) is the only installer.
 # Code signing turns on by itself once its secrets exist (unsigned otherwise):
 #   Windows (Azure Trusted Signing): AZURE_TENANT_ID, AZURE_CLIENT_ID,
 #     AZURE_CLIENT_SECRET + vars TRUSTED_SIGNING_ENDPOINT,
@@ -193,15 +194,7 @@ jobs:
       PYTHONUTF8: "1"
       WINDOWS_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
       MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
-      APPIMAGETOOL_VERSION: "1.9.1"
-      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
     steps:
-      # Runtime files must be byte-identical across platforms: update.json
-      # checksums come from the Linux build.
-      - name: Keep LF line endings
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
-
       - name: Checkout otclient
         uses: actions/checkout@v5
         with:
@@ -228,16 +221,6 @@ jobs:
           echo "CC=gcc-14" >> "$GITHUB_ENV"
           echo "CXX=g++-14" >> "$GITHUB_ENV"
 
-      - name: Install appimagetool
-        if: runner.os == 'Linux'
-        run: |
-          tool="$RUNNER_TEMP/appimagetool"
-          curl -fsSL -o "$tool" \
-            "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
-          echo "${APPIMAGETOOL_SHA256}  $tool" | sha256sum -c -
-          chmod +x "$tool"
-          echo "APPIMAGETOOL=$tool" >> "$GITHUB_ENV"
-
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: brew list ninja >/dev/null 2>&1 || brew install ninja
@@ -246,15 +229,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Remove-Item -Recurse -Force C:\mysql* -ErrorAction SilentlyContinue
-
-      - name: Install Inno Setup
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
-          if (-not (Test-Path $iscc)) { throw "ISCC not found after install" }
-          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: MSVC environment
         if: runner.os == 'Windows'
@@ -314,24 +288,18 @@ jobs:
           path: .vcpkg-bincache
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
-      - name: Stage runtime into IdleOT.app
+      - name: Brand engine bundle
         if: runner.os == 'macOS'
-        env:
-          SOURCE_COMMIT: ${{ env.SHA }}
-          IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
-          IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://cdn.idleot.com' }}
-          OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
-          OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
         run: |
           python3 tools/publish/package_desktop.py --platform macos-arm64 --bin "build/${{ matrix.preset }}/bin" \
-            --revision "${{ needs.check.outputs.revision }}" --stage-bundle --engine-out "build/${{ matrix.preset }}/engine"
+            --engine-bundle "build/${{ matrix.preset }}/engine"
 
       - name: Ad-hoc sign app bundle
         if: runner.os == 'macOS' && env.MACOS_SIGNING != 'true'
         run: |
-          cd build/${{ matrix.preset }}/bin
-          xattr -cr IdleOT.app ../engine/IdleOT.app
-          codesign --force --deep --sign - IdleOT.app ../engine/IdleOT.app
+          cd build/${{ matrix.preset }}/engine
+          xattr -cr IdleOT.app
+          codesign --force --deep --sign - IdleOT.app
 
       - name: Developer ID sign app bundle
         if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
@@ -350,11 +318,24 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$kc_pass" "$keychain" >/dev/null
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm -f "$RUNNER_TEMP/cert.p12"
-          cd build/${{ matrix.preset }}/bin
-          xattr -cr IdleOT.app ../engine/IdleOT.app
+          cd build/${{ matrix.preset }}/engine
+          xattr -cr IdleOT.app
           codesign --force --deep --options runtime --timestamp \
             --entitlements "$GITHUB_WORKSPACE/tools/publish/installer/idleot.entitlements" \
-            --sign "$MACOS_SIGN_IDENTITY" IdleOT.app ../engine/IdleOT.app
+            --sign "$MACOS_SIGN_IDENTITY" IdleOT.app
+
+      - name: Notarize engine bundle
+        if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          cd build/${{ matrix.preset }}/engine
+          ditto -c -k --keepParent IdleOT.app "$RUNNER_TEMP/IdleOT-engine.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/IdleOT-engine.zip" --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple IdleOT.app
 
       - name: Sign client executable
         if: runner.os == 'Windows' && env.WINDOWS_SIGNING == 'true'
@@ -372,7 +353,7 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
-      - name: Package installer
+      - name: Store engine and runtime
         shell: bash
         env:
           SOURCE_COMMIT: ${{ env.SHA }}
@@ -382,50 +363,14 @@ jobs:
           OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
         run: |
           extra=(--engine-files)
-          # The runtime tree is platform-independent; publish it once.
-          [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--update-files --content-files)
+          # The runtime tree is platform-independent; store it once.
+          [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--content-files)
           [[ "${{ matrix.platform }}" == macos-arm64 ]] && extra+=(--engine-app "build/${{ matrix.preset }}/engine/IdleOT.app")
           python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
             --bin "build/${{ matrix.preset }}/bin" --out "$RUNNER_TEMP/dist" \
             --revision "${{ needs.check.outputs.revision }}" "${extra[@]}"
 
-      - name: Sign installer
-        if: runner.os == 'Windows' && env.WINDOWS_SIGNING == 'true'
-        uses: azure/trusted-signing-action@v0
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
-          files-folder: ${{ runner.temp }}/dist/desktop
-          files-folder-filter: exe
-          files-folder-recurse: true
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-
-      - name: Notarize DMG
-        if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
-        env:
-          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: |
-          dmg="$(find "$RUNNER_TEMP/dist/desktop" -name '*.dmg' | head -n1)"
-          codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$dmg"
-          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_PASSWORD" --wait
-          xcrun stapler staple "$dmg"
-
-      - name: Refresh signed installer checksum
-        if: (runner.os == 'Windows' && env.WINDOWS_SIGNING == 'true') || (runner.os == 'macOS' && env.MACOS_SIGNING == 'true')
-        shell: bash
-        run: python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" --out "$RUNNER_TEMP/dist" --refresh-pointer
-
-      - name: Upload installer
+      - name: Upload store
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.platform }}
@@ -440,7 +385,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Download installers
+      - name: Download stores
         uses: actions/download-artifact@v4
         with:
           pattern: desktop-*
@@ -450,28 +395,12 @@ jobs:
         run: |
           mkdir -p slice/.idleot/v3 slice/content slice/packs
           for d in parts/desktop-*; do
-            cp -R "$d/desktop" slice/
             cp -R "$d/content/." slice/content/
             if [[ -d "$d/packs" ]]; then cp -R "$d/packs/." slice/packs/; fi
             cp "$d"/.idleot/v3/*.json slice/.idleot/v3/
           done
           python3 - <<'PY'
-          import json, pathlib, shutil
-          merged = None
-          for p in sorted(pathlib.Path("parts").glob("desktop-*/.idleot/desktop.json")):
-              d = json.loads(p.read_text())
-              if merged is None:
-                  merged = d
-              else:
-                  merged["platforms"].update(d["platforms"])
-          pathlib.Path("slice/.idleot/desktop.json").write_text(json.dumps(merged, indent=2) + "\n")
-          print(json.dumps(merged, indent=2))
-          updates = sorted(pathlib.Path("parts").glob("desktop-*/.idleot/update.json"))
-          if not updates:
-              raise SystemExit("no .idleot/update.json in the desktop artifacts")
-          shutil.copy(updates[0], "slice/.idleot/update.json")
-          u = json.loads(updates[0].read_text())
-          print(f"update tree: revision={u['revision']} engine={u['engine']} files={len(u['files'])}")
+          import json, pathlib
           v3 = pathlib.Path("slice/.idleot/v3")
           names = ["content-desktop"] + [f"engine-{p}" for p in ("windows-x64", "macos-arm64", "linux-x64")]
           lists = {n: json.loads((v3 / f"{n}.json").read_text()) for n in names}
