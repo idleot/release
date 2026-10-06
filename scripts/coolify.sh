@@ -38,7 +38,8 @@ case "$cmd" in
     echo "[coolify] image tag ${tag}"
     ;;
   deploy)
-    code="$(call GET "/deploy?uuid=${uuid}")"
+    code="$(call POST "/deploy?uuid=${uuid}")"
+    if [[ "$code" == 404 || "$code" == 405 ]]; then code="$(call GET "/deploy?uuid=${uuid}")"; fi
     [[ "$code" =~ ^2 ]] || { echo "::error::coolify deploy failed (HTTP ${code})"; exit 1; }
     dep="$(json "d['deployments'][0]['deployment_uuid']")"
     echo "[coolify] deployment queued"
