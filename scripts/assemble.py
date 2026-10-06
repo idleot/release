@@ -10,7 +10,7 @@ Inputs (directories extracted from images; any may be missing):
 
 Output tree (every manifest URL is relative to the bundle root, except
 launcher/latest.json — the Tauri updater needs absolute URLs, see --cdn-url):
-  latest/client-version.json
+  latest/client-version.json   live web revision (portal login needUpdate check)
   latest/desktop.json          installers per platform (the launcher's once it is published)
   launcher/latest.json         Tauri updater manifest (signed artifacts in launcher/<version>/)
   launcher/<version>/...       last --keep-launcher versions
@@ -334,30 +334,17 @@ def main() -> int:
         web["wasm"] = f"client/{web['engine']}/wasm"
     finish_v3(out, release, history["releases"])
 
-    w = sources["wasm"]
-    if w and (out / "client" / w["revision"] / "wasm" / "otclient.js").is_file():
-        rev = w["revision"]
-        wasm_files = {
-            "js": f"client/{rev}/wasm/otclient.js",
-            "wasm": f"client/{rev}/wasm/otclient.wasm",
-        }
-        # Builds before the v3 content store bake the runtime into otclient.data.
-        if (out / "client" / rev / "wasm" / "otclient.data").is_file():
-            wasm_files["data"] = f"client/{rev}/wasm/otclient.data"
-        manifest = {
-            "revision": rev,
-            "productSha": w.get("productSha", ""),
+    web = release["targets"].get("web")
+    if web:
+        # The portal's OTC login "needUpdate" check compares browser clients against this.
+        w = sources["wasm"] or {}
+        write_json(out / "latest" / "client-version.json", {
+            "revision": web["engine"],
+            "productSha": w.get("productSha", "") if w.get("revision") == web["engine"] else "",
             "assetsRevision": (sources["assets"] or {}).get("assetsRevision", ""),
-            "wasm": wasm_files,
-        }
-        web = release["targets"].get("web")
-        if web and web.get("content") == f"releases/{rev}/content-web.json":
-            manifest["content"] = web["content"]
-        elif "data" not in wasm_files:
-            print(f"[assemble] warning: WASM {rev} has neither otclient.data nor content-web", file=sys.stderr)
-        write_json(out / "latest" / "client-version.json", manifest)
+        })
     else:
-        print("[assemble] warning: no WASM slice — latest/client-version.json omitted", file=sys.stderr)
+        print("[assemble] warning: no web target — latest/client-version.json omitted", file=sys.stderr)
 
     d = sources["desktop"]
     if launcher_desktop:
