@@ -63,7 +63,9 @@ client/<rev>/wasm/otclient.{js,wasm,data}[.gz|.br]   last 3 revisions
 desktop/<rev>/IdleOT-Setup.exe | IdleOT.dmg | IdleOT-x86_64.AppImage   last 2 revisions
 desktop/<rev>/files/...      encrypted runtime tree the updater patches from
 assets/things/manifest.json + things-<version>.zip
-assets/store/...             store icons (Crystal coinImagesURL)
+assets/store/...             store icons (Crystal coinImagesURL; committed in slenderaac)
+assets/outfits/manifest.json + <rev>/<looktype>/...   AAC outfit frames (rendered by make extract)
+assets/items/manifest.json + <rev>/<id>.png           AAC item sprites (rendered by make extract)
 healthz
 ```
 
@@ -71,7 +73,7 @@ healthz
 |-------|-------|----------|
 | WASM | `ghcr.io/idleot/otclient-wasm:<otclient sha>` | `build-client.yml` |
 | Desktop installers + update tree | `ghcr.io/idleot/otclient-desktop:<otclient sha>` | `build-client.yml` |
-| Things + store | `ghcr.io/idleot/cdn-assets` | local `make -C apps/otclient publish-assets ARGS=--push` (CIP files never touch CI) |
+| Things + store + outfits + items | `ghcr.io/idleot/cdn-assets` | local `make -C apps/otclient publish-assets ARGS=--push` (CIP files never touch CI) |
 
 Targets — repository variable `IDLEOT_CDN_TARGETS`: `image` (default), `pages`,
 or `image,pages`. **image**: Coolify `idleot-cdn` runs `ghcr.io/idleot/cdn:<tag>`.

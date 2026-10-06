@@ -5,7 +5,7 @@ Inputs (directories extracted from images; any may be missing):
   --previous  tree of the last ghcr.io/idleot/cdn image (/usr/share/nginx/html)
   --wasm      otclient-wasm slice   (client/<rev>/wasm/*, .idleot/wasm.json)
   --desktop   otclient-desktop slice (desktop/<rev>/{installers,files/}, .idleot/{desktop,update}.json)
-  --assets    cdn-assets slice      (assets/things/*, assets/store/*, .idleot/assets.json)
+  --assets    cdn-assets slice      (assets/{things,store,outfits,items}/*, .idleot/assets.json)
 
 Output tree (every manifest URL is relative to the bundle root):
   latest/client-version.json
@@ -14,7 +14,7 @@ Output tree (every manifest URL is relative to the bundle root):
   latest/sources.json          pointers + revision history (drives pruning)
   client/<rev>/wasm/...        last --keep-wasm revisions
   desktop/<rev>/...            last --keep-desktop revisions
-  assets/things/..., assets/store/...
+  assets/{things,store,outfits,items}/...
   healthz
 """
 from __future__ import annotations
