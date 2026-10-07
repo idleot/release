@@ -3,6 +3,8 @@
 #   coolify.sh env <app-uuid> <KEY> <VALUE>    set an app env var (compose apps)
 #   coolify.sh image <app-uuid> <TAG> [NAME]   set docker_registry_image_tag (+ image name) (image apps)
 #   coolify.sh deploy <app-uuid>               deploy and wait until finished
+#   coolify.sh get-env <app-uuid> <KEY>        print an app env var's value (image tags only)
+#   coolify.sh get-image <app-uuid>            print docker_registry_image_tag
 # Env: COOLIFY_URL, COOLIFY_TOKEN. Output is limited to statuses — no URLs or
 # response bodies, since this runs in a public repo.
 set -euo pipefail
@@ -57,6 +59,18 @@ case "$cmd" in
     done
     echo "::error::coolify deployment timed out after ${TIMEOUT}s"; exit 1
     ;;
+  get-env)
+    key="$1"
+    code="$(call GET "/applications/${uuid}/envs")"
+    [[ "$code" =~ ^2 ]] || { echo "::error::coolify get-env ${key} failed (HTTP ${code})" >&2; exit 1; }
+    export COOLIFY_ENV_KEY="$key"
+    json "next((e.get('value') or '' for e in d if e.get('key') == __import__('os').environ['COOLIFY_ENV_KEY'] and not e.get('is_preview')), '')"
+    ;;
+  get-image)
+    code="$(call GET "/applications/${uuid}")"
+    [[ "$code" =~ ^2 ]] || { echo "::error::coolify get-image failed (HTTP ${code})" >&2; exit 1; }
+    json "d.get('docker_registry_image_tag') or ''"
+    ;;
   *)
-    echo "usage: coolify.sh env|image|deploy <uuid> ..." >&2; exit 2 ;;
+    echo "usage: coolify.sh env|image|deploy|get-env|get-image <uuid> ..." >&2; exit 2 ;;
 esac

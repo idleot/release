@@ -3,8 +3,11 @@
 # as `ref`; the umbrella's submodule pointers decide what ships.
 #
 #   resolve -> build client / server / portal / launcher (parallel, skipped if built)
-#           -> deploy server + portal (only once every build succeeded)
-#           -> promote client (CDN bundle with the exact slice tags) -> deploy cdn
+#           -> bundle the CDN image (exact slice tags) — nothing is live yet
+#           -> close the portal login gate (client or server releases) + drop sessions
+#           -> deploy server + portal + cdn (+ pages) together
+#           -> reopen the gate once the CDN serves the new release revision
+#              (any failure: roll every app back to what was live, reopen)
 #           -> move :latest to what is live, GitHub Release on the umbrella tag
 #
 # components: auto (submodule changes since the previous v* tag, or all when the
@@ -136,14 +139,93 @@ jobs:
           bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/portal" build-image.yml \
             "${{ needs.resolve.outputs.release_id }}" "ref=${{ needs.resolve.outputs.portal_sha }}"
 
-  # Nothing goes live until every selected build succeeded, so a failed client
-  # build never leaves a new server running against old clients.
-  deploy-server:
-    name: Deploy server
+  # Everything is built — CDN bundle included — before anything goes live, so a
+  # failed build never leaves a new server running against old clients.
+  bundle:
+    name: Bundle CDN
     needs: [resolve, build-client, build-launcher, build-server, build-portal]
     if: >-
-      always() && needs.resolve.outputs.server == 'true' &&
+      always() && needs.resolve.outputs.promote == 'true' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    uses: ./.github/workflows/bundle.yml
+    secrets: inherit
+    with:
+      wasm_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
+      desktop_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
+      launcher_tag: ${{ needs.build-launcher.outputs.version || 'latest' }}
+      release_id: ${{ needs.resolve.outputs.release_id }}
+      publish_pages: false
+
+  # Logins close only while server, portal and CDN switch over together, and
+  # only for client or server releases (portal-, launcher- and assets-only
+  # releases switch with logins open). Closing drops every game session, so
+  # reconnects go back through the portal login and its client revision check.
+  # Also records what each app runs now, for rollback.
+  close-gate:
+    name: Close login gate
+    needs: [resolve, build-client, build-launcher, build-server, build-portal, bundle]
+    if: >-
+      always() && needs.resolve.result == 'success' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    outputs:
+      gated: ${{ steps.gate.outputs.gated }}
+      server_tag: ${{ steps.live.outputs.server_tag }}
+      portal_tag: ${{ steps.live.outputs.portal_tag }}
+      cdn_tag: ${{ steps.live.outputs.cdn_tag }}
+    env:
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+      SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+      RELEASE_GATE_TOKEN: ${{ secrets.RELEASE_GATE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Record what is live
+        id: live
+        env:
+          SERVER: ${{ needs.resolve.outputs.server }}
+          PORTAL: ${{ needs.resolve.outputs.portal }}
+          CDN: ${{ needs.bundle.result == 'success' && contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image') }}
+          SERVER_APP: ${{ vars.COOLIFY_SERVER_UUID }}
+          PORTAL_APP: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
+          CDN_APP: ${{ vars.COOLIFY_CDN_UUID }}
+        run: |
+          if [[ "$SERVER" == true && -n "$SERVER_APP" ]]; then
+            tag="$(bash scripts/coolify.sh get-env "$SERVER_APP" IMAGE_TAG)"
+            echo "server_tag=${tag}" >> "$GITHUB_OUTPUT"; echo "server: ${tag:-<unset>}"
+          fi
+          if [[ "$PORTAL" == true && -n "$PORTAL_APP" ]]; then
+            tag="$(bash scripts/coolify.sh get-image "$PORTAL_APP")"
+            echo "portal_tag=${tag}" >> "$GITHUB_OUTPUT"; echo "portal: ${tag:-<unset>}"
+          fi
+          if [[ "$CDN" == true && -n "$CDN_APP" ]]; then
+            tag="$(bash scripts/coolify.sh get-image "$CDN_APP")"
+            echo "cdn_tag=${tag}" >> "$GITHUB_OUTPUT"; echo "cdn: ${tag:-<unset>}"
+          fi
+
+      - name: Close
+        id: gate
+        if: needs.resolve.outputs.server == 'true' || needs.resolve.outputs.client == 'true'
+        run: |
+          if [[ -z "$RELEASE_GATE_TOKEN" ]]; then
+            echo "::warning::RELEASE_GATE_TOKEN is not set — switching without the login gate"
+            echo "gated=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          rc=0
+          bash scripts/gate.sh close || rc=$?
+          case "$rc" in
+            0) echo "gated=true" >> "$GITHUB_OUTPUT" ;;
+            3) echo "gated=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$rc" ;;
+          esac
+
+  deploy-server:
+    name: Deploy server
+    needs: [resolve, close-gate]
+    if: always() && needs.resolve.outputs.server == 'true' && needs.close-gate.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
@@ -180,10 +262,8 @@ jobs:
 
   deploy-portal:
     name: Deploy portal
-    needs: [resolve, build-client, build-launcher, build-server, build-portal]
-    if: >-
-      always() && needs.resolve.outputs.portal == 'true' &&
-      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    needs: [resolve, close-gate]
+    if: always() && needs.resolve.outputs.portal == 'true' && needs.close-gate.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -193,6 +273,7 @@ jobs:
       APP: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
       SHA: ${{ needs.resolve.outputs.portal_sha }}
       SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+      RELEASE_GATE_TOKEN: ${{ secrets.RELEASE_GATE_TOKEN }}
     steps:
       # build-portal (or an earlier release) produced portal:<sha>; the image is
       # private to idleot/portal, so this repo never inspects it — Coolify pulls.
@@ -200,6 +281,10 @@ jobs:
       - name: Point the portal app at portal:${{ env.SHA }}
         run: |
           [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_PORTAL_UUID"; exit 1; }
+          # The release env secret is the only copy of the gate token.
+          if [[ -n "$RELEASE_GATE_TOKEN" ]]; then
+            bash scripts/coolify.sh env "$APP" RELEASE_GATE_TOKEN "$RELEASE_GATE_TOKEN"
+          fi
           bash scripts/coolify.sh image "$APP" "$SHA" "$REGISTRY/portal"
           bash scripts/coolify.sh deploy "$APP"
       - name: Wait for the site
@@ -210,24 +295,12 @@ jobs:
           done
           echo "::error::site did not come back"; exit 1
 
-  promote:
-    name: Promote client
-    needs: [resolve, build-client, build-launcher, deploy-server, deploy-portal]
-    if: >-
-      always() && needs.resolve.outputs.promote == 'true' &&
-      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
-    uses: ./.github/workflows/bundle.yml
-    secrets: inherit
-    with:
-      wasm_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
-      desktop_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
-      launcher_tag: ${{ needs.build-launcher.outputs.version || 'latest' }}
-      release_id: ${{ needs.resolve.outputs.release_id }}
-
   deploy-cdn:
     name: Deploy CDN
-    needs: [resolve, promote]
-    if: always() && needs.promote.result == 'success' && contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image')
+    needs: [resolve, bundle, close-gate]
+    if: >-
+      always() && needs.bundle.result == 'success' && needs.close-gate.result == 'success' &&
+      contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -235,7 +308,7 @@ jobs:
       COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
       COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
       APP: ${{ vars.COOLIFY_CDN_UUID }}
-      TAG: ${{ needs.promote.outputs.tag }}
+      TAG: ${{ needs.bundle.outputs.tag }}
       CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
     steps:
       - uses: actions/checkout@v5
@@ -247,16 +320,107 @@ jobs:
       - name: Wait for the CDN
         run: |
           for _ in $(seq 1 30); do
-            curl -fsS -o /dev/null "$CDN_URL/latest/client-version.json" && { echo "cdn up"; exit 0; }
+            curl -fsS -o /dev/null "$CDN_URL/latest/release.json" && { echo "cdn up"; exit 0; }
             sleep 10
           done
-          echo "::error::CDN did not serve latest/client-version.json"; exit 1
+          echo "::error::CDN did not serve latest/release.json"; exit 1
+
+  deploy-pages:
+    name: Deploy GitHub Pages
+    needs: [bundle, close-gate]
+    if: >-
+      always() && needs.bundle.result == 'success' && needs.close-gate.result == 'success' &&
+      contains(vars.IDLEOT_CDN_TARGETS || 'image', 'pages')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+  # The portal answers 409 until it reads the new revision from the live CDN.
+  open-gate:
+    name: Open login gate
+    needs: [resolve, bundle, close-gate, deploy-server, deploy-portal, deploy-cdn, deploy-pages]
+    if: >-
+      always() && needs.close-gate.result == 'success' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - name: Open
+        if: needs.close-gate.outputs.gated == 'true'
+        env:
+          SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          RELEASE_GATE_TOKEN: ${{ secrets.RELEASE_GATE_TOKEN }}
+          EXPECT: ${{ needs.bundle.outputs.revision }}
+        run: bash scripts/gate.sh open "$EXPECT"
+
+  # A failed switch puts every app it touched back on what was live before and
+  # reopens logins. Pages cannot be reverted from here: rerun bundle.yml.
+  rollback:
+    name: Roll back
+    needs: [resolve, close-gate, deploy-server, deploy-portal, deploy-cdn, deploy-pages, open-gate]
+    if: >-
+      always() && needs.close-gate.result == 'success' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    env:
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Restore server
+        if: always() && needs.deploy-server.result != 'skipped' && needs.close-gate.outputs.server_tag != ''
+        env:
+          APP: ${{ vars.COOLIFY_SERVER_UUID }}
+          TAG: ${{ needs.close-gate.outputs.server_tag }}
+        run: |
+          bash scripts/coolify.sh env "$APP" IMAGE_TAG "$TAG"
+          bash scripts/coolify.sh deploy "$APP"
+      - name: Restore portal
+        if: always() && needs.deploy-portal.result != 'skipped' && needs.close-gate.outputs.portal_tag != ''
+        env:
+          APP: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
+          TAG: ${{ needs.close-gate.outputs.portal_tag }}
+        run: |
+          bash scripts/coolify.sh image "$APP" "$TAG"
+          bash scripts/coolify.sh deploy "$APP"
+      - name: Restore CDN
+        if: always() && needs.deploy-cdn.result != 'skipped' && needs.close-gate.outputs.cdn_tag != ''
+        env:
+          APP: ${{ vars.COOLIFY_CDN_UUID }}
+          TAG: ${{ needs.close-gate.outputs.cdn_tag }}
+        run: |
+          bash scripts/coolify.sh image "$APP" "$TAG"
+          bash scripts/coolify.sh deploy "$APP"
+      - name: Pages
+        if: always() && needs.deploy-pages.result == 'success'
+        run: echo "::warning::GitHub Pages already serves the new bundle; rerun bundle.yml with the previous slice tags to revert it"
+      - name: Reopen the gate
+        if: always() && needs.close-gate.outputs.gated == 'true'
+        env:
+          SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          RELEASE_GATE_TOKEN: ${{ secrets.RELEASE_GATE_TOKEN }}
+        run: bash scripts/gate.sh open
+      - name: Fail the release
+        if: always()
+        run: echo "::error::the switch failed and was rolled back"; exit 1
 
   finalize:
     name: Finalize
-    needs: [resolve, build-client, build-launcher, deploy-server, deploy-portal, promote, deploy-cdn]
+    needs: [resolve, build-client, build-launcher, bundle, close-gate, deploy-server, deploy-portal, deploy-cdn, deploy-pages, open-gate]
     if: >-
-      always() && needs.resolve.result == 'success' &&
+      always() && needs.resolve.result == 'success' && needs.open-gate.result == 'success' &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -272,9 +436,9 @@ jobs:
       - name: Move :latest to what is live
         env:
           SERVER: ${{ needs.deploy-server.result }}
-          PROMOTE: ${{ needs.promote.result }}
+          PROMOTE: ${{ needs.bundle.result }}
           CLIENT: ${{ needs.resolve.outputs.client }}
-          BUNDLE_TAG: ${{ needs.promote.outputs.tag }}
+          BUNDLE_TAG: ${{ needs.bundle.outputs.tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
           OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
           LAUNCHER_VERSION: ${{ needs.build-launcher.outputs.version }}
@@ -313,7 +477,7 @@ jobs:
             "${{ needs.resolve.outputs.otclient_sha }}" "${{ needs.resolve.outputs.crystalserver_sha }}" \
             "${{ needs.resolve.outputs.portal_sha }}" "${{ needs.resolve.outputs.client }}" \
             "${{ needs.resolve.outputs.server }}" "${{ needs.resolve.outputs.portal }}" \
-            "${{ needs.build-launcher.outputs.version || 'unchanged' }}" "${{ needs.promote.outputs.tag }}" \
+            "${{ needs.build-launcher.outputs.version || 'unchanged' }}" "${{ needs.bundle.outputs.tag }}" \
             "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
           gh release create "$REF" -R "${{ github.repository_owner }}/idleot" --verify-tag --title "$REF" --notes "$notes" >/dev/null \
             || gh release edit "$REF" -R "${{ github.repository_owner }}/idleot" --notes "$notes" >/dev/null

@@ -1,8 +1,9 @@
 ---
 # Assemble the CDN bundle from exact slice tags and push ghcr.io/idleot/cdn:<tag>.
-# Called by release.yml at promotion time (after the server is live); it does
-# not deploy and does not move :latest — release.yml does both once Coolify
-# is running the new tag. `:latest` therefore always means "live".
+# release.yml calls this right after the builds, before anything goes live; it
+# does not deploy and does not move :latest — release.yml switches the CDN
+# together with the server and portal, then moves :latest. `:latest` therefore
+# always means "live".
 #
 # The previous tree is the live bundle (cdn:latest), so older WASM/desktop
 # revisions stay reachable for clients that have not reloaded yet.
@@ -35,9 +36,15 @@ on:
       release_id:
         type: string
         default: ""
+      publish_pages:
+        type: boolean
+        default: false
     outputs:
       tag:
         value: ${{ jobs.bundle.outputs.tag }}
+      revision:
+        description: latest/release.json revision of the bundle
+        value: ${{ jobs.bundle.outputs.revision }}
   workflow_dispatch:
     inputs:
       wasm_tag:
@@ -55,6 +62,10 @@ on:
       release_id:
         description: Correlation id (set by release.yml)
         default: ""
+      publish_pages:
+        description: Deploy GitHub Pages now (when IDLEOT_CDN_TARGETS has pages)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -78,6 +89,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
+      revision: ${{ steps.revision.outputs.revision }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -118,6 +130,13 @@ jobs:
             echo "::warning::Bundle is ${size_mb} MB — GitHub Pages caps published sites at 1 GB"
           fi
 
+      - name: Release revision
+        id: revision
+        run: |
+          rev="$(python3 -c "import json; print(json.load(open('site/latest/release.json')).get('revision', ''))" 2>/dev/null || true)"
+          echo "revision=${rev}" >> "$GITHUB_OUTPUT"
+          echo "Release revision: ${rev:-<none>}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Tag
         id: meta
         run: echo "tag=$(date -u +%Y%m%d)-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
@@ -149,10 +168,11 @@ jobs:
           package-type: container
           min-versions-to-keep: 10
 
+  # release.yml deploys Pages itself, together with the server and portal.
   pages:
     name: Deploy GitHub Pages
     needs: [bundle]
-    if: contains(vars.IDLEOT_CDN_TARGETS || 'image', 'pages')
+    if: inputs.publish_pages && contains(vars.IDLEOT_CDN_TARGETS || 'image', 'pages')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

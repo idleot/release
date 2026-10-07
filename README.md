@@ -18,10 +18,36 @@ git push origin v1.4.0
 
 ```
 resolve -> build client, launcher (here) | build server, portal (dispatched to private repos)
-        -> deploy server + portal (only after every selected build succeeded)
-        -> promote client         (bundle.yml with the exact slice tags) -> deploy CDN
+        -> bundle      (bundle.yml with the exact slice tags; pushed, not live)
+        -> close-gate  (record live tags; portal stops issuing game sessions)
+        -> deploy server | portal | CDN | Pages   (in parallel)
+        -> open-gate   (portal confirms latest/release.json is the new revision)
         -> :latest = live, GitHub Release on the umbrella tag
 ```
+
+Nothing goes live until every selected build and the bundle exist, so the flip
+is only the deploy window (~1-3 min).
+
+- **Gate** — `scripts/gate.sh` calls the portal `POST /api/release/gate`
+  (Bearer `RELEASE_GATE_TOKEN`). Closing it also deletes every game session
+  key, so clients already past the character list cannot enter the new
+  server; logins answer "IdleOT is updating" (God accounts bypass) and the
+  SSO client retries on its own. Opening waits until the portal reads the new
+  `latest/release.json` revision. The gate is closed only when the server or
+  client ships; portal/launcher-only releases deploy without it. Without the
+  secret (or on a portal that predates the endpoint) releases deploy ungated
+  with a warning.
+- **Outdated clients** — the portal accepts logins only from the live
+  `latest/release.json` revision (the launcher passes it as
+  `IDLEOT_CLIENT_REVISION`; `/play` too). Players online during a client-only
+  release stay connected and are offered the restart at their next login. The
+  client never polls for updates.
+- **Auto rollback** — when any deploy or the gate reopen fails, `rollback`
+  points server, portal and CDN back at the tags `close-gate` recorded,
+  reopens the gate and fails the run. GitHub Pages is not rolled back
+  (re-run **Bundle** for the previous release if Pages is a target).
+- **Stuck closed** (run cancelled mid-rollback): reopen by hand with
+  `SITE_URL=https://www.idleot.com RELEASE_GATE_TOKEN=... bash scripts/gate.sh open`.
 
 - **auto** — a component ships when its submodule pointer changed since the
   previous `v*` tag (`apps/otclient` → client, `apps/crystalserver` → server,
@@ -95,6 +121,7 @@ things blobs public; WASM still loads through the portal same-origin `/cdn` prox
 | `TAURI_SIGNING_PRIVATE_KEY` (+ optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) | `release` env secret | signs launcher updates; the public key is `apps/launcher/src-tauri/tauri.conf.json` `plugins.updater.pubkey` |
 | `OTC_ENCRYPTION_PASSWORD`, `OTC_ENCRYPTION_HEADER` | `release` env secret | alphanumeric; password 100+ chars |
 | `COOLIFY_URL`, `COOLIFY_TOKEN` | `release` env secret | Coolify API |
+| `RELEASE_GATE_TOKEN` | `release` env secret | login gate during the flip (`openssl rand -hex 32`); `deploy-portal` copies it into the portal's Coolify env, so a rotated token takes effect with the next portal release (until then `close-gate` fails before anything deploys) |
 | `COOLIFY_SERVER_UUID`, `COOLIFY_PORTAL_UUID` (falls back to `COOLIFY_AAC_UUID`), `COOLIFY_CDN_UUID` | `release` env variable | Coolify apps |
 | `IDLEOT_CDN_TARGETS` | repo variable | `image` / `pages` / `image,pages` |
 | `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` + vars `TRUSTED_SIGNING_ENDPOINT`, `TRUSTED_SIGNING_ACCOUNT`, `TRUSTED_SIGNING_PROFILE` | `release` env (optional) | Windows signing (Azure Trusted Signing) of the client and launcher; unsigned when absent |
