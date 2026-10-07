@@ -27,7 +27,8 @@ case "$cmd" in
       code="$(post '{"open": false}')"
       case "$code" in
         2*) echo "[gate] closed"; exit 0 ;;
-        404) echo "::warning::portal has no release gate yet — switching without one"; exit 3 ;;
+        # A portal without the route answers 404, or 405 (no POST handler for the path).
+        404|405) echo "::warning::portal has no release gate yet — switching without one"; exit 3 ;;
         401|403) echo "::error::gate rejected the token (HTTP ${code})"; exit 1 ;;
       esac
       sleep 10
