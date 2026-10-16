@@ -14,7 +14,6 @@
 # tag annotation contains [release:all]) | all | client | server | portal |
 # launcher | server+portal | assets (re-bundle live client with the newest cdn-assets).
 # The launcher ships when the pinned portal's apps/launcher version changed.
-# `aac` is still accepted as an alias for `portal`.
 # Desktop client image is always tibia-desktop; WASM image remains otclient-wasm
 # (name kept for CDN/ACL; contents are tibia.js / tibia.wasm).
 # skip_build redeploys existing images — use it with an older tag to roll back.
@@ -32,7 +31,7 @@ on:
         description: What to release
         type: choice
         default: auto
-        options: [auto, all, client, server, portal, launcher, server+portal, assets, aac, server+aac]
+        options: [auto, all, client, server, portal, launcher, server+portal, assets]
       skip_build:
         description: Redeploy existing images only (rollback)
         type: boolean

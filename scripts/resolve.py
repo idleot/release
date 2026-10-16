@@ -11,7 +11,6 @@ Env:
   OWNER        GitHub org (idleot)
   REF          umbrella tag or commit
   COMPONENTS   auto | all | client | server | portal | launcher | server+portal | assets
-               (`aac` is accepted as an alias for `portal`)
   SKIP_BUILD   true to redeploy existing images only
 
 Writes key=value lines to $GITHUB_OUTPUT (and stdout).
@@ -28,9 +27,6 @@ import urllib.request
 
 API = "https://api.github.com"
 ENGINES = {"client": "apps/otclient", "server": "apps/crystalserver", "portal": "apps/portal"}
-# Submodule paths before a rename, so older tags still resolve.
-LEGACY_PATHS = {"portal": ["apps/slenderaac"]}
-ALIASES = {"aac": "portal"}
 COMPONENTS = [*ENGINES, "launcher"]
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -56,11 +52,9 @@ def gh(path: str):
 def pins(repo: str, ref: str) -> dict[str, str]:
     out = {}
     for comp, path in ENGINES.items():
-        for candidate in [path, *LEGACY_PATHS.get(comp, [])]:
-            entry = gh(f"/repos/{repo}/contents/{candidate}?ref={ref}")
-            if entry and entry.get("type") == "submodule":
-                out[comp] = entry["sha"]
-                break
+        entry = gh(f"/repos/{repo}/contents/{path}?ref={ref}")
+        if entry and entry.get("type") == "submodule":
+            out[comp] = entry["sha"]
         else:
             raise SystemExit(f"[resolve] {path} is not a submodule at {ref}")
     return out
@@ -133,7 +127,7 @@ def main() -> int:
     elif mode == "assets":
         selected, reason = set(), "assets only"
     else:
-        selected = {ALIASES.get(c, c) for c in mode.split("+")}
+        selected = set(mode.split("+"))
         unknown = selected - set(COMPONENTS)
         if unknown:
             raise SystemExit(f"[resolve] unknown components: {sorted(unknown)}")

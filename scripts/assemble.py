@@ -4,7 +4,7 @@
 Inputs (directories extracted from images; any may be missing):
   --previous  tree of the last ghcr.io/idleot/cdn image (/usr/share/nginx/html)
   --wasm      browser wasm slice    (client/<rev>/wasm/tibia.*, .idleot/wasm.json)
-  --desktop   otclient-desktop slice (engine-<platform> + content-desktop lists)
+  --desktop   tibia-desktop slice (engine-<platform> + content-desktop lists)
   --assets    cdn-assets slice      (assets/{store,outfits,items}/*, content-things list, .idleot/assets.json)
   --launcher  launcher slice        (launcher/<version>/*, .idleot/launcher.json)
 
@@ -299,7 +299,6 @@ def main() -> int:
 
     history = sources["history"]
     history["wasm"] = remember(history.get("wasm", []), (sources["wasm"] or {}).get("revision"), args.keep_wasm)
-    history.pop("desktop", None)
     releases = history.get("releases", [])
     for rev in sorted(new_revisions):
         releases = remember(releases, rev, args.keep_releases)

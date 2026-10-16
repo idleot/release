@@ -51,12 +51,12 @@ is only the deploy window (~1-3 min).
 
 - **auto** — a component ships when its submodule pointer changed since the
   previous `v*` tag (`apps/otclient` → client, `apps/crystalserver` → server,
-  `apps/portal` → portal; older tags with `apps/slenderaac` still resolve). Bump a pointer to include a component; add
+  `apps/portal` → portal). Bump a pointer to include a component; add
   `[release:all]` to the tag annotation to force everything. The launcher
   ships when the pinned portal's `apps/launcher/package.json` `version` changed
   (bump it to publish a launcher; `launcher:<version>` is never rebuilt).
 - **Manual** — run **Release** with `components` = `all | client | server |
-  portal | launcher | server+portal | assets` (`aac` is an alias for `portal`). `assets` re-bundles the live client with the
+  portal | launcher | server+portal | assets`. `assets` re-bundles the live client with the
   newest `cdn-assets` (after `publish-assets --push`).
 - **Rollback** — run **Release** with an older tag and `skip_build`. Images are
   immutable `:<sha>` tags (last 10 kept), so nothing rebuilds.
@@ -104,7 +104,7 @@ healthz
 | Slice | Image | Built by |
 |-------|-------|----------|
 | WASM | `ghcr.io/idleot/otclient-wasm:<otclient sha>` | `build-client.yml` |
-| v3 engine/content lists, blobs and packs | `ghcr.io/idleot/otclient-desktop:<otclient sha>` | `build-client.yml` |
+| v3 engine/content lists, blobs and packs | `ghcr.io/idleot/tibia-desktop:<otclient sha>` | `build-client.yml` |
 | Launcher installers + signed update artifacts | `ghcr.io/idleot/launcher:<version>` | `build-launcher.yml` (Tauri, from `idleot/portal` `apps/launcher`) |
 | Things (content-things list) + store + outfits + items | `ghcr.io/idleot/cdn-assets` | local `make -C apps/otclient publish-assets ARGS=--push` (CIP files never touch CI) |
 
@@ -139,7 +139,7 @@ launcher and send players to `/download`. Installs from before the launcher
 read the fixed `latest/update.json`, whose foreign engine makes them offer the
 same reinstall.
 
-Every private package (`otclient-wasm`, `otclient-desktop`, `launcher`, `cdn`,
+Every private package (`otclient-wasm`, `tibia-desktop`, `launcher`, `cdn`,
 `cdn-assets`, `crystalserver`) grants this repo **Actions access:
 Admin** under *Package settings → Manage Actions access*, so `GITHUB_TOKEN`
 can read, push, retag and prune without changing package visibility.
