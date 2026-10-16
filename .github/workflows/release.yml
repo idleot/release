@@ -15,6 +15,8 @@
 # launcher | server+portal | assets (re-bundle live client with the newest cdn-assets).
 # The launcher ships when the pinned portal's apps/launcher version changed.
 # `aac` is still accepted as an alias for `portal`.
+# Desktop client image is always tibia-desktop; WASM image remains otclient-wasm
+# (name kept for CDN/ACL; contents are tibia.js / tibia.wasm).
 # skip_build redeploys existing images — use it with an older tag to roll back.
 name: Release
 
@@ -152,6 +154,7 @@ jobs:
     with:
       wasm_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
       desktop_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
+      desktop_image: ${{ needs.build-client.outputs.desktop_image }}
       launcher_tag: ${{ needs.build-launcher.outputs.version || 'latest' }}
       release_id: ${{ needs.resolve.outputs.release_id }}
       publish_pages: false
@@ -441,6 +444,7 @@ jobs:
           BUNDLE_TAG: ${{ needs.bundle.outputs.tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
           OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
+          DESKTOP_IMAGE: ${{ needs.build-client.outputs.desktop_image || 'tibia-desktop' }}
           LAUNCHER_VERSION: ${{ needs.build-launcher.outputs.version }}
         run: |
           retag() { docker buildx imagetools create -t "$REGISTRY/$1:latest" "$REGISTRY/$1:$2" && echo "$1:$2 -> latest"; }
@@ -448,7 +452,7 @@ jobs:
           if [[ "$PROMOTE" == success ]]; then
             if [[ "$CLIENT" == true ]]; then
               retag otclient-wasm "$OTC_SHA"
-              retag otclient-desktop "$OTC_SHA"
+              retag "$DESKTOP_IMAGE" "$OTC_SHA"
             fi
             [[ -n "$LAUNCHER_VERSION" ]] && retag launcher "$LAUNCHER_VERSION"
             retag cdn "$BUNDLE_TAG"

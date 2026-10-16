@@ -27,6 +27,9 @@ on:
       desktop_tag:
         type: string
         default: latest
+      desktop_image:
+        type: string
+        default: ""
       assets_tag:
         type: string
         default: latest
@@ -51,8 +54,11 @@ on:
         description: otclient-wasm tag (otclient SHA or latest)
         default: latest
       desktop_tag:
-        description: otclient-desktop tag (otclient SHA or latest)
+        description: desktop slice tag (otclient SHA or latest)
         default: latest
+      desktop_image:
+        description: desktop slice image (default tibia-desktop)
+        default: "tibia-desktop"
       assets_tag:
         description: cdn-assets tag
         default: latest
@@ -108,12 +114,13 @@ jobs:
         env:
           WASM_TAG: ${{ inputs.wasm_tag }}
           DESKTOP_TAG: ${{ inputs.desktop_tag }}
+          DESKTOP_IMAGE: ${{ inputs.desktop_image || 'tibia-desktop' }}
           ASSETS_TAG: ${{ inputs.assets_tag }}
           LAUNCHER_TAG: ${{ inputs.launcher_tag }}
         run: |
           bash scripts/extract-image.sh "$REGISTRY/cdn:latest" /usr/share/nginx/html slices/previous
           bash scripts/extract-image.sh "$REGISTRY/otclient-wasm:${WASM_TAG}" / slices/wasm
-          bash scripts/extract-image.sh "$REGISTRY/otclient-desktop:${DESKTOP_TAG}" / slices/desktop
+          bash scripts/extract-image.sh "$REGISTRY/${DESKTOP_IMAGE}:${DESKTOP_TAG}" / slices/desktop
           bash scripts/extract-image.sh "$REGISTRY/cdn-assets:${ASSETS_TAG}" / slices/assets
           bash scripts/extract-image.sh "$REGISTRY/launcher:${LAUNCHER_TAG}" / slices/launcher
 

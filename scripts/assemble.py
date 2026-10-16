@@ -3,7 +3,7 @@
 
 Inputs (directories extracted from images; any may be missing):
   --previous  tree of the last ghcr.io/idleot/cdn image (/usr/share/nginx/html)
-  --wasm      otclient-wasm slice   (client/<rev>/wasm/*, .idleot/wasm.json)
+  --wasm      browser wasm slice    (client/<rev>/wasm/tibia.*, .idleot/wasm.json)
   --desktop   otclient-desktop slice (engine-<platform> + content-desktop lists)
   --assets    cdn-assets slice      (assets/{store,outfits,items}/*, content-things list, .idleot/assets.json)
   --launcher  launcher slice        (launcher/<version>/*, .idleot/launcher.json)
@@ -156,7 +156,7 @@ def finish_v3(out: Path, release: dict, history: list[str]) -> None:
     for name, target in list(targets.items()):
         broken = [rel for rel in target_lists(target) if list_missing(out, rel) != 0]
         wasm = target.get("wasm")
-        if wasm and not (out / wasm / "otclient.js").is_file():
+        if wasm and not (out / wasm / "tibia.js").is_file():
             broken.append(wasm)
         if broken:
             print(f"[assemble] warning: v3 target {name} incomplete ({', '.join(broken)}) — dropped",

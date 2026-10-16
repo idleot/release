@@ -5,14 +5,13 @@
 # tags to bundle.yml after the server is live.
 #
 # This repo is public (free runners), so:
-#   - Lua/OTUI ship encrypted (OTC_ENCRYPTION_* secrets, encrypt_assets.py).
 #   - Compiler output goes to files; logs show only an error summary.
-#   - No layer/compiler caches of product code; only third-party vcpkg/emsdk.
-#   - Artifacts hold only the encrypted content store the CDN publishes anyway.
+#   - No layer/compiler caches of product code; only third-party vcpkg/Qt.
+#   - Artifacts hold only the content store the CDN publishes anyway.
 #
-# Desktop: the engine per platform + the runtime tree (once, from Linux) go into
-# the launcher content store (package_desktop.py). The IdleOT launcher
-# (build-launcher.yml) is the only installer.
+# Desktop: tibia (Qt/QML in src/tibia) → image tibia-desktop. Browser: tibia+
+# gamecore under Qt emsdk → image otclient-wasm (name kept for CDN/ACL; contents
+# are tibia.js / tibia.wasm). QML is compiled in; nothing to encrypt.
 # Code signing turns on by itself once its secrets exist (unsigned otherwise):
 #   Windows (Azure Trusted Signing): AZURE_TENANT_ID, AZURE_CLIENT_ID,
 #     AZURE_CLIENT_SECRET + vars TRUSTED_SIGNING_ENDPOINT,
@@ -36,6 +35,8 @@ on:
     outputs:
       revision:
         value: ${{ jobs.check.outputs.revision }}
+      desktop_image:
+        value: ${{ jobs.check.outputs.desktop_image }}
   workflow_dispatch:
     inputs:
       otclient_sha:
@@ -52,6 +53,7 @@ permissions:
 env:
   REGISTRY: ghcr.io/${{ github.repository_owner }}
   SHA: ${{ inputs.otclient_sha }}
+  DESKTOP_IMAGE: tibia-desktop
 
 jobs:
   check:
@@ -62,6 +64,7 @@ jobs:
       wasm: ${{ steps.exists.outputs.wasm }}
       desktop: ${{ steps.exists.outputs.desktop }}
       revision: ${{ steps.exists.outputs.revision }}
+      desktop_image: ${{ steps.exists.outputs.desktop_image }}
     steps:
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -74,9 +77,12 @@ jobs:
         id: exists
         run: |
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::otclient_sha must be a full commit SHA"; exit 1; }
+          echo "desktop_image=$DESKTOP_IMAGE" >> "$GITHUB_OUTPUT"
           for slice in wasm desktop; do
-            if docker buildx imagetools inspect "$REGISTRY/otclient-$slice:$SHA" >/dev/null 2>&1; then
-              echo "$slice=true" >> "$GITHUB_OUTPUT"; echo "otclient-$slice:$SHA exists — skipping"
+            image="otclient-wasm"
+            [[ "$slice" == desktop ]] && image="$DESKTOP_IMAGE"
+            if docker buildx imagetools inspect "$REGISTRY/$image:$SHA" >/dev/null 2>&1; then
+              echo "$slice=true" >> "$GITHUB_OUTPUT"; echo "$image:$SHA exists — skipping"
             else
               echo "$slice=false" >> "$GITHUB_OUTPUT"
             fi
@@ -87,7 +93,7 @@ jobs:
     name: WASM
     needs: [check]
     if: needs.check.outputs.wasm != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     environment: release
     steps:
@@ -99,17 +105,68 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN }}
           persist-credentials: false
 
-      - name: Write encryption secret
-        env:
-          OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
-          OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
+      - name: Install dependencies
         run: |
-          umask 077
-          printf 'OTC_ENCRYPTION_PASSWORD=%s\nOTC_ENCRYPTION_HEADER=%s\n' \
-            "$OTC_ENCRYPTION_PASSWORD" "$OTC_ENCRYPTION_HEADER" > "$RUNNER_TEMP/otc_encryption"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build python3-venv libegl1-mesa-dev libfontconfig1-dev \
+            libxkbcommon-dev gzip brotli >/dev/null
+
+      - name: Cache Qt
+        uses: actions/cache@v4
+        with:
+          path: ~/Qt
+          key: qt-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}
+
+      - name: Install Qt for WebAssembly + emsdk
+        run: bash tools/qt/install-qt.sh --wasm
+
+      - name: Get vcpkg baseline
+        run: |
+          commit="$(grep '"builtin-baseline"' vcpkg.json | awk -F: '{print $2}' | tr -d '," \r')"
+          echo "VCPKG_GIT_COMMIT_ID=${commit}" >> "$GITHUB_ENV"
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: ${{ github.workspace }}/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_GIT_COMMIT_ID }}
+
+      - name: Build tibia + gamecore wasm
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: |
+          summary() {
+            echo "::group::error summary ($1)"
+            grep -E "(error|Error|FAILED|CMake Error)" "$1" | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 60
+            echo "::endgroup::"
+          }
+          if ! bash deploy/build-tibia.sh --wasm > "$RUNNER_TEMP/wasm-build.log" 2>&1; then
+            summary "$RUNNER_TEMP/wasm-build.log"; exit 1
+          fi
+          echo "build ok ($(wc -l < "$RUNNER_TEMP/wasm-build.log") lines suppressed)"
+          NOTES="$(find build/tibia-wasm -name tibia-wasm-size.txt -type f | head -1 || true)"
+          [[ -n "$NOTES" ]] || { echo "::error::tibia-wasm-size.txt missing"; exit 1; }
+          cat "$NOTES"
+          WASM="$(find build/tibia-wasm -name tibia.wasm \( -type f -o -type l \) | head -1)"
+          test -n "$WASM" && test -e "$WASM"
+          wasm_bytes=$(wc -c < "$WASM" | tr -d ' ')
+          echo "tibia.wasm bytes=$wasm_bytes"
+          if [[ "$wasm_bytes" -lt 5000000 ]]; then
+            echo "::error::tibia.wasm < 5MB — likely built without gamecore"
+            exit 1
+          fi
+
+      - name: Pack wasm slice
+        env:
+          IDLEOT_ENGINE_SHA: ${{ env.SHA }}
+          IDLEOT_CLIENT_REVISION: ${{ needs.check.outputs.revision }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/slice"
+          bash deploy/pack-tibia-wasm.sh build/tibia-wasm "$RUNNER_TEMP/slice"
+          test -f "$RUNNER_TEMP/slice/.idleot/wasm.json"
+          test -f "$(find "$RUNNER_TEMP/slice/client" -name tibia.js | head -1)"
 
       - name: Set up Docker Buildx
-        id: buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
@@ -119,45 +176,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Restore third-party cache mounts
-        id: mounts
-        uses: actions/cache@v4
-        with:
-          path: buildkit-mounts
-          key: wasm-mounts-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ env.SHA }}
-          restore-keys: |
-            wasm-mounts-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-
-            wasm-mounts-
-
-      - name: Inject cache mounts into BuildKit
-        uses: reproducible-containers/buildkit-cache-dance@v3
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          skip-extraction: ${{ steps.mounts.outputs.cache-hit }}
-          cache-map: |
-            {
-              "buildkit-mounts/vcpkg-binaries": { "target": "/var/cache/vcpkg-binaries", "id": "idleot-vcpkg-binaries" },
-              "buildkit-mounts/vcpkg-downloads": { "target": "/var/cache/vcpkg-downloads", "id": "idleot-vcpkg-downloads" },
-              "buildkit-mounts/emsdk": { "target": "/var/cache/emsdk", "id": "idleot-emsdk" },
-              "buildkit-mounts/emsdk-compile": { "target": "/var/cache/emsdk-compile", "id": "idleot-emsdk-compile" }
-            }
-
-      - name: Build and push otclient-wasm:${{ env.SHA }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          target: artifact
-          push: true
-          provenance: false
-          sbom: false
-          tags: ${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}
-          secret-files: |
-            otc_encryption=${{ runner.temp }}/otc_encryption
-          build-args: |
-            SOURCE_COMMIT=${{ env.SHA }}
-            IDLEOT_QUIET_BUILD=1
-            IDLEOT_EXTRA_CFLAGS=-w -fno-caret-diagnostics
+      - name: Push otclient-wasm:${{ env.SHA }}
+        working-directory: ${{ runner.temp }}/slice
+        run: |
+          printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
+          docker buildx build --push --provenance=false --sbom=false \
+            -f Dockerfile.slice \
+            -t "${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}" .
 
   desktop:
     name: Desktop (${{ matrix.platform }})
@@ -172,12 +197,10 @@ jobs:
             preset: linux-release
             triplet: x64-linux-release
             cflags: -w -fno-diagnostics-show-caret
-          # windows-release already uses the release-only x64-windows-static-release overlay.
           - platform: windows-x64
             os: windows-2025-vs2026
             preset: windows-release
             triplet: ""
-            # Dash form: Git Bash rewrites "/w" in env vars to the path "W:/".
             cflags: -w
           - platform: macos-arm64
             os: macos-15
@@ -217,13 +240,32 @@ jobs:
           sudo apt-get install -y -qq autoconf autoconf-archive automake gcc-14 g++-14 \
             libgl1-mesa-dev libglu1-mesa-dev libltdl-dev libtool libtool-bin \
             libx11-dev libx11-xcb-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev \
-            linux-libc-dev make ninja-build perl pkg-config >/dev/null
+            linux-libc-dev make ninja-build perl pkg-config \
+            python3-venv patchelf libegl1-mesa-dev libfontconfig1-dev \
+            libxkbcommon-dev libxkbcommon-x11-0 >/dev/null
           echo "CC=gcc-14" >> "$GITHUB_ENV"
           echo "CXX=g++-14" >> "$GITHUB_ENV"
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: brew list ninja >/dev/null 2>&1 || brew install ninja
+
+      - name: Restore Qt
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: qt-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}
+
+      - name: Install Qt
+        shell: bash
+        run: |
+          export QT_ROOT="$RUNNER_TEMP/Qt"
+          if ! bash tools/qt/install-qt.sh > "$RUNNER_TEMP/qt.log" 2>&1; then
+            tail -n 20 "$RUNNER_TEMP/qt.log"; exit 1
+          fi
+          prefix="$(bash tools/qt/qt-prefix.sh)"
+          [[ -n "$prefix" ]] || { echo "::error::Qt install finished but tools/qt/qt-prefix.sh finds no Qt"; exit 1; }
+          echo "QT_PREFIX=$prefix" >> "$GITHUB_ENV"
 
       - name: Remove Windows pre-installed MySQL
         if: runner.os == 'Windows'
@@ -252,13 +294,6 @@ jobs:
           vcpkgGitURL: "https://github.com/microsoft/vcpkg.git"
           vcpkgGitCommitId: ${{ env.VCPKG_GIT_COMMIT_ID }}
 
-      - name: Write encryption header
-        shell: bash
-        env:
-          OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
-          OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
-        run: python3 tools/publish/encrypt_assets.py header src/framework/idleot_encryption.h
-
       - name: Configure and build (quiet)
         shell: bash
         run: |
@@ -267,19 +302,23 @@ jobs:
             grep -E "(error|Error|FAILED|CMake Error)" "$1" | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 60
             echo "::endgroup::"
           }
-          args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF)
+          args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
+                -DCMAKE_PREFIX_PATH="$QT_PREFIX" -DTOGGLE_FRAMEWORK_SOUND=OFF -DOTCLIENT_BUILD_CLIENT=OFF)
           if [[ -n "${{ matrix.triplet }}" ]]; then
             args+=("-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}" "-DVCPKG_HOST_TRIPLET=${{ matrix.triplet }}")
+          fi
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            args+=(-DBUILD_STATIC_LIBRARY=OFF -DVCPKG_TARGET_TRIPLET=x64-windows-static-md-release
+                   -DVCPKG_HOST_TRIPLET=x64-windows-static-md-release)
           fi
           if ! cmake --preset "${{ matrix.preset }}" "${args[@]}" > "$RUNNER_TEMP/configure.log" 2>&1; then
             summary "$RUNNER_TEMP/configure.log"; exit 1
           fi
           echo "configure ok ($(wc -l < "$RUNNER_TEMP/configure.log") lines suppressed)"
-          if ! cmake --build --preset "${{ matrix.preset }}" > "$RUNNER_TEMP/build.log" 2>&1; then
+          if ! cmake --build --preset "${{ matrix.preset }}" --target tibia > "$RUNNER_TEMP/build.log" 2>&1; then
             summary "$RUNNER_TEMP/build.log"; exit 1
           fi
           echo "build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
-          rm -f src/framework/idleot_encryption.h
 
       - name: Save vcpkg binary cache
         if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -288,11 +327,15 @@ jobs:
           path: .vcpkg-bincache
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
-      - name: Brand engine bundle
-        if: runner.os == 'macOS'
+      - name: Deploy Qt runtime
+        shell: bash
         run: |
-          python3 tools/publish/package_desktop.py --platform macos-arm64 --bin "build/${{ matrix.preset }}/bin" \
-            --engine-bundle "build/${{ matrix.preset }}/engine"
+          if ! python3 tools/publish/package_desktop.py --app tibia --platform "${{ matrix.platform }}" \
+              --bin "build/${{ matrix.preset }}" --engine-bundle "build/${{ matrix.preset }}/engine" \
+              > "$RUNNER_TEMP/deploy.log" 2>&1; then
+            grep -iE "error|not found|no such" "$RUNNER_TEMP/deploy.log" | cut -c1-300 | tail -n 30; exit 1
+          fi
+          echo "qt runtime deployed ($(wc -l < "$RUNNER_TEMP/deploy.log") lines suppressed)"
 
       - name: Ad-hoc sign app bundle
         if: runner.os == 'macOS' && env.MACOS_SIGNING != 'true'
@@ -347,7 +390,7 @@ jobs:
           endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
-          files-folder: build/${{ matrix.preset }}/bin
+          files-folder: build/${{ matrix.preset }}/engine
           files-folder-filter: exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -359,14 +402,15 @@ jobs:
           SOURCE_COMMIT: ${{ env.SHA }}
           IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://cdn.idleot.com' }}
-          OTC_ENCRYPTION_PASSWORD: ${{ secrets.OTC_ENCRYPTION_PASSWORD }}
-          OTC_ENCRYPTION_HEADER: ${{ secrets.OTC_ENCRYPTION_HEADER }}
         run: |
           extra=(--engine-files)
-          # The runtime tree is platform-independent; store it once.
           [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--content-files)
-          [[ "${{ matrix.platform }}" == macos-arm64 ]] && extra+=(--engine-app "build/${{ matrix.preset }}/engine/IdleOT.app")
-          python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
+          if [[ "${{ matrix.platform }}" == macos-arm64 ]]; then
+            extra+=(--engine-app "build/${{ matrix.preset }}/engine/IdleOT.app")
+          else
+            extra+=(--engine-dir "build/${{ matrix.preset }}/engine")
+          fi
+          python3 tools/publish/package_desktop.py --app tibia --platform "${{ matrix.platform }}" \
             --bin "build/${{ matrix.preset }}/bin" --out "$RUNNER_TEMP/dist" \
             --revision "${{ needs.check.outputs.revision }}" "${extra[@]}"
 
@@ -380,7 +424,7 @@ jobs:
           retention-days: 1
 
   desktop-publish:
-    name: Push otclient-desktop
+    name: Push ${{ needs.check.outputs.desktop_image }}
     needs: [check, desktop]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -429,7 +473,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push otclient-desktop:${{ env.SHA }}
+      - name: Push ${{ needs.check.outputs.desktop_image }}:${{ env.SHA }}
         uses: docker/build-push-action@v6
         with:
           context: slice
@@ -437,4 +481,4 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          tags: ${{ env.REGISTRY }}/otclient-desktop:${{ env.SHA }}
+          tags: ${{ env.REGISTRY }}/${{ needs.check.outputs.desktop_image }}:${{ env.SHA }}

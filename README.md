@@ -66,15 +66,15 @@ is only the deploy window (~1-3 min).
 
 This repo is public; the engines are not.
 
-- Client Lua/OTUI/OTMOD ship encrypted (`OTC_ENCRYPTION_*`, otclient
-  `tools/publish/encrypt_assets.py` + `ENABLE_ENCRYPTION`). This is
-  obfuscation — the key is inside the binary — not a secret store.
+- Product client is **tibia** (compiled QML + gamecore). Desktop slice is
+  `tibia-desktop`; WASM slice is tibia artifacts (`tibia.js` / `tibia.wasm`)
+  published under the kept image name `ghcr.io/idleot/otclient-wasm`. There is
+  no Lua/OTUI encrypt path.
 - Compiler output is written to files; logs show only an error summary
   (`-w`, no carets). Cross-repo builds report only their conclusion.
 - No layer or compiler caches of product code; only third-party vcpkg/emsdk.
-- Artifacts are only the encrypted desktop content store the CDN serves
-  anyway (1-day retention). Slice and bundle images are private
-  GHCR packages.
+- Artifacts are the desktop content store the CDN serves (1-day retention).
+  Slice and bundle images are private GHCR packages.
 - No `pull_request` workflows; outside contributors need approval; the default
   token is read-only; secrets live in the `release` environment (main only).
 
@@ -92,7 +92,7 @@ releases/<rev>/*.json        v3 file lists {revision, engine, entry?, files{path
 releases/things-<rev>/content-things.json   sprites (data/things/<version>), merged into web/desktop by client-sync
 content/<aa>/<sha256>        content-addressed blobs (immutable; pruned with releases/)
 packs/<aa>/<sha256>.zip      ~16 MB zips of list blobs (one round trip for cold installs)
-client/<rev>/wasm/otclient.{js,wasm}[.gz|.br]   last 3 revisions
+client/<rev>/wasm/tibia.{js,wasm}[.gz|.br] + qtloader   last 3 revisions (image: otclient-wasm)
 launcher/latest.json         Tauri updater manifest (absolute URLs, minisign signatures)
 launcher/<version>/IdleOT-Setup.exe | IdleOT.dmg | IdleOT.app.tar.gz | IdleOT-x86_64.AppImage (+ .sig)   last 2 versions
 assets/store/...             store icons (Crystal coinImagesURL; committed in portal apps/web)
@@ -119,7 +119,6 @@ things blobs public; WASM still loads through the portal same-origin `/cdn` prox
 |------|-------|---------|
 | `RELEASE_TOKEN` | `release` env secret | fine-grained PAT: Contents read on `otclient` + `idleot` + `portal` (launcher source), Actions read/write on `crystalserver` + `portal` |
 | `TAURI_SIGNING_PRIVATE_KEY` (+ optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) | `release` env secret | signs launcher updates; the public key is `apps/launcher/src-tauri/tauri.conf.json` `plugins.updater.pubkey` |
-| `OTC_ENCRYPTION_PASSWORD`, `OTC_ENCRYPTION_HEADER` | `release` env secret | alphanumeric; password 100+ chars |
 | `COOLIFY_URL`, `COOLIFY_TOKEN` | `release` env secret | Coolify API |
 | `RELEASE_GATE_TOKEN` | `release` env secret | login gate during the flip (`openssl rand -hex 32`); `deploy-portal` copies it into the portal's Coolify env, so a rotated token takes effect with the next portal release (until then `close-gate` fails before anything deploys) |
 | `COOLIFY_SERVER_UUID`, `COOLIFY_PORTAL_UUID` (falls back to `COOLIFY_AAC_UUID`), `COOLIFY_CDN_UUID` | `release` env variable | Coolify apps |
