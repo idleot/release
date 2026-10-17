@@ -72,7 +72,7 @@ This repo is public; the engines are not.
   no Lua/OTUI encrypt path.
 - Compiler output is written to files; logs show only an error summary
   (`-w`, no carets). Cross-repo builds report only their conclusion.
-- No layer or compiler caches of product code; only third-party vcpkg/emsdk.
+- No layer or compiler caches of product code; only the pinned Qt SDK and emsdk.
 - Artifacts are the desktop content store the CDN serves (1-day retention).
   Slice and bundle images are private GHCR packages.
 - No `pull_request` workflows; outside contributors need approval; the default

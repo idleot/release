@@ -6,7 +6,7 @@
 #
 # This repo is public (free runners), so:
 #   - Compiler output goes to files; logs show only an error summary.
-#   - No layer/compiler caches of product code; only third-party vcpkg/Qt.
+#   - No layer/compiler caches of product code; only the pinned Qt SDK.
 #   - Artifacts hold only the content store the CDN publishes anyway.
 #
 # Desktop: tibia (Qt/QML in src/tibia) → image tibia-desktop. Browser: tibia+
@@ -120,20 +120,7 @@ jobs:
       - name: Install Qt for WebAssembly + emsdk
         run: bash tools/qt/install-qt.sh --wasm
 
-      - name: Get vcpkg baseline
-        run: |
-          commit="$(grep '"builtin-baseline"' vcpkg.json | awk -F: '{print $2}' | tr -d '," \r')"
-          echo "VCPKG_GIT_COMMIT_ID=${commit}" >> "$GITHUB_ENV"
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: ${{ github.workspace }}/vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_GIT_COMMIT_ID }}
-
-      - name: Build tibia + gamecore wasm
-        env:
-          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      - name: Build tibia wasm
         run: |
           summary() {
             echo "::group::error summary ($1)"
@@ -195,7 +182,7 @@ jobs:
           - platform: linux-x64
             os: ubuntu-24.04
             preset: linux-release
-            triplet: x64-linux-release
+            triplet: ""
             cflags: -w -fno-diagnostics-show-caret
           - platform: windows-x64
             os: windows-2025-vs2026
@@ -205,13 +192,12 @@ jobs:
           - platform: macos-arm64
             os: macos-15
             preset: macos-release
-            triplet: arm64-osx-release
+            triplet: ""
             cflags: -w -fno-caret-diagnostics
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     environment: release
     env:
-      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/.vcpkg-bincache,readwrite"
       CFLAGS: ${{ matrix.cflags }}
       CXXFLAGS: ${{ matrix.cflags }}
       PYTHONUTF8: "1"
@@ -225,13 +211,6 @@ jobs:
           ref: ${{ env.SHA }}
           token: ${{ secrets.RELEASE_TOKEN }}
           persist-credentials: false
-
-      - name: Get vcpkg baseline
-        shell: bash
-        run: |
-          commit="$(grep '"builtin-baseline"' vcpkg.json | awk -F: '{print $2}' | tr -d '," \r')"
-          echo "VCPKG_GIT_COMMIT_ID=${commit}" >> "$GITHUB_ENV"
-          mkdir -p .vcpkg-bincache
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -278,22 +257,6 @@ jobs:
         with:
           arch: x64
 
-      - name: Restore vcpkg binary cache
-        id: vcpkg-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .vcpkg-bincache
-          key: vcpkg-desktop-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-${{ env.SHA }}
-          restore-keys: |
-            vcpkg-desktop-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}-
-            vcpkg-desktop-${{ matrix.platform }}-
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitURL: "https://github.com/microsoft/vcpkg.git"
-          vcpkgGitCommitId: ${{ env.VCPKG_GIT_COMMIT_ID }}
-
       - name: Configure and build (quiet)
         shell: bash
         run: |
@@ -303,13 +266,9 @@ jobs:
             echo "::endgroup::"
           }
           args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
-                -DCMAKE_PREFIX_PATH="$QT_PREFIX" -DTOGGLE_FRAMEWORK_SOUND=OFF -DOTCLIENT_BUILD_CLIENT=OFF)
-          if [[ -n "${{ matrix.triplet }}" ]]; then
-            args+=("-DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}" "-DVCPKG_HOST_TRIPLET=${{ matrix.triplet }}")
-          fi
+                -DCMAKE_PREFIX_PATH="$QT_PREFIX")
           if [[ "$RUNNER_OS" == Windows ]]; then
-            args+=(-DBUILD_STATIC_LIBRARY=OFF -DVCPKG_TARGET_TRIPLET=x64-windows-static-md-release
-                   -DVCPKG_HOST_TRIPLET=x64-windows-static-md-release)
+            args+=(-DBUILD_STATIC_LIBRARY=OFF)
           fi
           if ! cmake --preset "${{ matrix.preset }}" "${args[@]}" > "$RUNNER_TEMP/configure.log" 2>&1; then
             summary "$RUNNER_TEMP/configure.log"; exit 1
@@ -319,13 +278,6 @@ jobs:
             summary "$RUNNER_TEMP/build.log"; exit 1
           fi
           echo "build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
-
-      - name: Save vcpkg binary cache
-        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .vcpkg-bincache
-          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Deploy Qt runtime
         shell: bash
