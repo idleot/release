@@ -282,7 +282,7 @@ jobs:
       - name: Deploy Qt runtime
         shell: bash
         run: |
-          if ! python3 tools/publish/package_desktop.py --app tibia --platform "${{ matrix.platform }}" \
+          if ! python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
               --bin "build/${{ matrix.preset }}" --engine-bundle "build/${{ matrix.preset }}/engine" \
               > "$RUNNER_TEMP/deploy.log" 2>&1; then
             grep -iE "error|not found|no such" "$RUNNER_TEMP/deploy.log" | cut -c1-300 | tail -n 30; exit 1
@@ -362,7 +362,7 @@ jobs:
           else
             extra+=(--engine-dir "build/${{ matrix.preset }}/engine")
           fi
-          python3 tools/publish/package_desktop.py --app tibia --platform "${{ matrix.platform }}" \
+          python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
             --bin "build/${{ matrix.preset }}/bin" --out "$RUNNER_TEMP/dist" \
             --revision "${{ needs.check.outputs.revision }}" "${extra[@]}"
 
