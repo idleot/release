@@ -262,7 +262,8 @@ jobs:
         run: |
           summary() {
             echo "::group::error summary ($1)"
-            grep -nE "(FAILED:|error C[0-9]|fatal error|error:|LNK[0-9])" "$1" | cut -c1-500 | tail -n 40
+            grep -nE "FAILED:" "$1" | cut -c1-500 | head -n 20
+            grep -nE "(error C[0-9]|fatal error|error:|LNK[0-9])" "$1" | cut -c1-500 | head -n 30
             echo "::endgroup::"
           }
           args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
@@ -275,9 +276,24 @@ jobs:
           fi
           echo "configure ok ($(wc -l < "$RUNNER_TEMP/configure.log") lines suppressed)"
           if ! cmake --build --preset "${{ matrix.preset }}" --target tibia > "$RUNNER_TEMP/build.log" 2>&1; then
-            summary "$RUNNER_TEMP/build.log"; exit 1
+            summary "$RUNNER_TEMP/build.log"
+            # Keep the full log so the next Windows diagnosis can name the TU.
+            if [[ "$RUNNER_OS" == Windows ]]; then
+              mkdir -p "$RUNNER_TEMP/fail-logs"
+              cp "$RUNNER_TEMP/build.log" "$RUNNER_TEMP/fail-logs/build.log"
+            fi
+            exit 1
           fi
           echo "build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
+
+      - name: Upload Windows build log
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-log
+          path: ${{ runner.temp }}/fail-logs/build.log
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Deploy Qt runtime
         shell: bash
