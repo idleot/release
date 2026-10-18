@@ -262,7 +262,7 @@ jobs:
         run: |
           summary() {
             echo "::group::error summary ($1)"
-            grep -E "(error|Error|FAILED|CMake Error)" "$1" | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 60
+            grep -nE "(FAILED:|error C[0-9]|fatal error|error:|LNK[0-9])" "$1" | cut -c1-500 | tail -n 40
             echo "::endgroup::"
           }
           args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
