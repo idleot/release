@@ -44,7 +44,9 @@ permissions:
   id-token: write
 
 concurrency:
-  group: release
+  # v1.0.51's run stuck in "waiting" and GitHub refuses cancel/force-cancel
+  # (409, not in progress). A new group lets the next dispatch start.
+  group: idleot-release
   cancel-in-progress: false
 
 env:
