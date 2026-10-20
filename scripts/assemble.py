@@ -259,7 +259,7 @@ def main() -> int:
     }
 
     if previous:
-        for name in ("client", "assets", "releases", "content", "packs", "launcher"):
+        for name in ("client", "assets", "releases", "content", "packs", "launcher", "installers"):
             copy_tree(previous / name, out / name)
 
     prev_release = (load_json(previous / "latest" / "release.json") if previous else None) or {}
@@ -279,6 +279,10 @@ def main() -> int:
     if wasm:
         copy_tree(wasm / "client", out / "client")
         sources["wasm"] = load_json(wasm / ".idleot" / "wasm.json") or sources["wasm"]
+    if desktop and (desktop / "installers").is_dir():
+        # Qt CIP launcher archives from package_launcher.py (overwrites previous).
+        shutil.rmtree(out / "installers", ignore_errors=True)
+        copy_tree(desktop / "installers", out / "installers")
     write_json(out / "latest" / "update.json", RETIRED_UPDATE)
     things = next((t["things"] for t in prev_release.get("targets", {}).values() if t.get("things")), None)
     if assets:
@@ -346,17 +350,15 @@ def main() -> int:
 
     from cip_package import emit_cip
 
-    launcher_version = (sources.get("launcher") or {}).get("version") or "dev"
+    # Prefer the client revision for CIP launcher packages; fall back to legacy Tauri version.
+    launcher_version = release.get("revision") or (sources.get("launcher") or {}).get("version") or "dev"
     extra: list[Path] = []
     launcher_root = out / "launcher"
     if launcher_root.is_dir():
-        for path in launcher_root.rglob("*"):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(launcher_root).as_posix()
-            if rel == "latest.json" or rel.endswith("tibiametadata.json"):
-                continue
-            if path.parent == launcher_root and path.suffix.lower() in {".dmg", ".exe", ".appimage", ".zip"}:
+        for path in launcher_root.iterdir():
+            if path.is_file() and path.suffix.lower() in {".dmg", ".exe", ".appimage", ".zip"}:
+                if path.name.startswith("IdleOT-"):
+                    continue  # produced by emit_cip itself
                 extra.append(path)
     emit_cip(out, cdn_url, str(launcher_version), extra)
 

@@ -24,6 +24,7 @@ import json
 import lzma
 import os
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
@@ -36,9 +37,22 @@ PLATFORMS = (
 )
 
 DESKTOP_JSON_KEYS = {
-    "windows-x64": "launcher-windows-current",
-    "macos-arm64": "launcher-macos-current",
-    "linux-x64": "launcher-linux-current",
+    "windows-x64": "windows-x64",
+    "macos-arm64": "macos-arm64",
+    "linux-x64": "linux-x64",
+}
+
+# CIP os name → installers/<platform>/ from the desktop slice.
+INSTALLER_PLATFORM = {
+    "windows": "windows-x64",
+    "macos": "macos-arm64",
+    "linux": "linux-x64",
+}
+
+LAUNCHER_EXECUTABLE = {
+    "windows": "IdleOT.exe",
+    "macos": "IdleOT.app/Contents/MacOS/IdleOT",
+    "linux": "idleot-launcher",
 }
 
 def sha256_bytes(data: bytes) -> str:
@@ -137,6 +151,21 @@ def copy_plain(src: Path, dest: Path) -> None:
     shutil.copy2(src, dest)
 
 
+def pack_tree(out: Path, package_dir: Path, tree: Path) -> list[dict]:
+    """lzma-pack every file under tree; localfile paths are relative to tree."""
+    if not tree.is_dir():
+        return []
+    records: list[dict] = []
+    files = sorted(p for p in tree.rglob("*") if p.is_file())
+    for index, path in enumerate(files, start=1):
+        if index == 1 or index % 200 == 0 or index == len(files):
+            print(f"[assemble] CIP {package_dir.name} {index}/{len(files)} {path.relative_to(tree)}")
+        rec = pack_file(out, package_dir, path, path.relative_to(tree).as_posix())
+        if rec:
+            records.append(rec)
+    return records
+
+
 def emit_cip(
     out: Path,
     cdn_url: str,
@@ -167,6 +196,7 @@ def emit_cip(
         launcher_dir = out / "launcher" / launcher_dir_name
         client_dir = out / "launcher" / client_dir_name
         launcher_records: list[dict] = []
+        launcher_exe = "launcher"
         if os_name == "web":
             wasm_rel = (targets.get("web") or {}).get("wasm")
             wasm_dir = out / wasm_rel if wasm_rel else None
@@ -177,13 +207,28 @@ def emit_cip(
                     rec = pack_file(out, launcher_dir, src, name)
                     if rec:
                         launcher_records.append(rec)
-        if os_name != "web":
-            for path in launcher_files or []:
-                if path.is_file():
-                    rec = pack_file(out, launcher_dir, path, path.name)
-                    if rec:
-                        launcher_records.append(rec)
-        write_package(launcher_dir, launcher_version, "launcher", launcher_records, None)
+        else:
+            plat = INSTALLER_PLATFORM[os_name]
+            tree = out / "installers" / plat
+            if tree.is_dir():
+                launcher_records.extend(pack_tree(out, launcher_dir, tree))
+                launcher_exe = LAUNCHER_EXECUTABLE[os_name]
+            else:
+                # Legacy Tauri installers dropped at launcher/*.dmg|exe|appimage|zip.
+                for path in launcher_files or []:
+                    if path.is_file() and plat.replace("-", "") in path.name.replace("-", "").lower():
+                        rec = pack_file(out, launcher_dir, path, path.name)
+                        if rec:
+                            launcher_records.append(rec)
+                if not launcher_records:
+                    for path in launcher_files or []:
+                        if path.is_file():
+                            rec = pack_file(out, launcher_dir, path, path.name)
+                            if rec:
+                                launcher_records.append(rec)
+            if not launcher_records:
+                print(f"[assemble] warning: no desktop launcher files for {plat}")
+        write_package(launcher_dir, launcher_version, launcher_exe, launcher_records, None)
         launcher_builds.append({
             "os": os_name,
             "architecture": arch,
@@ -249,28 +294,40 @@ def emit_cip(
                 if not target.exists():
                     shutil.copy2(image, target)
 
+    # /download reads latest/desktop.json — ship real launcher archives, not CIP metadata.
     platforms_out: dict = {}
-    for key, dirname in DESKTOP_JSON_KEYS.items():
-        folder = out / "launcher" / dirname
-        archive = out / "launcher" / f"{dirname}.zip"
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for path in sorted(folder.rglob("*")):
-                if path.is_file():
-                    zf.write(path, path.relative_to(folder).as_posix())
+    for key, plat in DESKTOP_JSON_KEYS.items():
+        prebuilt = out / "installers" / f"{plat}.zip"
+        archive = out / "launcher" / f"IdleOT-{plat}.zip"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        if prebuilt.is_file():
+            shutil.copy2(prebuilt, archive)
+        else:
+            tree = out / "installers" / plat
+            if not tree.is_dir():
+                print(f"[assemble] warning: no installer for {plat} — omitted from desktop.json")
+                continue
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for path in sorted(tree.rglob("*")):
+                    if path.is_file():
+                        zf.write(path, path.relative_to(tree).as_posix())
         data = archive.read_bytes()
         platforms_out[key] = {
-            "url": f"launcher/{dirname}.zip",
+            "url": f"launcher/{archive.name}",
             "size": len(data),
             "sha256": sha256_bytes(data),
             "file": archive.name,
             "format": "zip",
         }
-    write_json(out / "latest" / "desktop.json", {
-        "schema": 2,
-        "kind": "launcher",
-        "revision": launcher_version,
-        "version": launcher_version,
-        "platforms": platforms_out,
-    })
+    if platforms_out:
+        write_json(out / "latest" / "desktop.json", {
+            "schema": 2,
+            "kind": "launcher",
+            "revision": launcher_version,
+            "version": launcher_version,
+            "platforms": platforms_out,
+        })
+    else:
+        print("[assemble] warning: desktop.json not written — no launcher installers", file=sys.stderr)
     print(f"[assemble] CIP launcher tree at {cdn_url}/launcher/tibiametadata.json")
     return True

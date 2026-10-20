@@ -284,7 +284,16 @@ jobs:
             fi
             exit 1
           fi
-          echo "build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
+          echo "tibia build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
+          if ! cmake --build --preset "${{ matrix.preset }}" --target launcher > "$RUNNER_TEMP/launcher-build.log" 2>&1; then
+            summary "$RUNNER_TEMP/launcher-build.log"
+            if [[ "$RUNNER_OS" == Windows ]]; then
+              mkdir -p "$RUNNER_TEMP/fail-logs"
+              cp "$RUNNER_TEMP/launcher-build.log" "$RUNNER_TEMP/fail-logs/launcher-build.log"
+            fi
+            exit 1
+          fi
+          echo "launcher build ok ($(wc -l < "$RUNNER_TEMP/launcher-build.log") lines suppressed)"
 
       - name: Upload Windows build log
         if: failure() && runner.os == 'Windows'
@@ -382,6 +391,22 @@ jobs:
             --bin "build/${{ matrix.preset }}/bin" --out "$RUNNER_TEMP/dist" \
             --revision "${{ needs.check.outputs.revision }}" "${extra[@]}"
 
+      - name: Package CIP launcher installer
+        shell: bash
+        env:
+          QT_PREFIX: ${{ env.QT_PREFIX }}
+        run: |
+          # bin/ may be TOGGLE_BIN_FOLDER or the preset root; search both.
+          bin_dir="build/${{ matrix.preset }}/bin"
+          [[ -d "$bin_dir" ]] || bin_dir="build/${{ matrix.preset }}"
+          if ! python3 tools/publish/package_launcher.py \
+              --platform "${{ matrix.platform }}" \
+              --bin "$bin_dir" \
+              --out "$RUNNER_TEMP/dist" > "$RUNNER_TEMP/launcher-pack.log" 2>&1; then
+            cat "$RUNNER_TEMP/launcher-pack.log"; exit 1
+          fi
+          echo "launcher installer ok ($(wc -l < "$RUNNER_TEMP/launcher-pack.log") lines)"
+
       - name: Upload store
         uses: actions/upload-artifact@v4
         with:
@@ -405,11 +430,18 @@ jobs:
 
       - name: Merge platforms
         run: |
-          mkdir -p slice/.idleot/v3 slice/content slice/packs
+          mkdir -p slice/.idleot/v3 slice/content slice/packs slice/installers
           for d in parts/desktop-*; do
             cp -R "$d/content/." slice/content/
             if [[ -d "$d/packs" ]]; then cp -R "$d/packs/." slice/packs/; fi
             cp "$d"/.idleot/v3/*.json slice/.idleot/v3/
+            if [[ -d "$d/installers" ]]; then
+              cp -R "$d/installers/." slice/installers/
+            fi
+          done
+          for plat in windows-x64 macos-arm64 linux-x64; do
+            [[ -f "slice/installers/${plat}.zip" ]] || { echo "::error::missing installers/${plat}.zip"; exit 1; }
+            echo "installer ${plat}: $(wc -c < "slice/installers/${plat}.zip") bytes"
           done
           python3 - <<'PY'
           import json, pathlib
