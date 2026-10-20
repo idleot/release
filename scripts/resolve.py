@@ -3,8 +3,9 @@
 
 The umbrella tag pins every engine via submodule pointers. A component is
 selected when its pointer changed since the previous v* tag, or when forced by
-COMPONENTS / a `[release:all]` flag in the tag annotation. The launcher lives in
-the portal repo and ships when apps/launcher/package.json "version" changed.
+COMPONENTS / a `[release:all]` flag in the tag annotation. The Tauri launcher lived in the portal repo and shipped when
+apps/launcher/package.json "version" changed. The Qt CIP launcher ships with
+the client; when that package.json is gone, the launcher component is skipped.
 
 Env:
   GH_TOKEN     token that can read idleot/idleot (and idleot/portal contents)
@@ -109,6 +110,8 @@ def main() -> int:
     prev = previous_tag(tags, ref)
     message = tag_message(repo, ref) if ref in tags else ""
 
+    tauri_version = launcher_version(owner, current["portal"])
+
     selected: set[str]
     if mode == "auto":
         if "[release:all]" in message or prev is None:
@@ -117,9 +120,8 @@ def main() -> int:
         else:
             before = pins(repo, prev)
             selected = {c for c in ENGINES if before[c] != current[c]}
-            if "portal" in selected:
-                version = launcher_version(owner, current["portal"])
-                if version and version != launcher_version(owner, before["portal"]):
+            if "portal" in selected and tauri_version:
+                if tauri_version != launcher_version(owner, before["portal"]):
                     selected.add("launcher")
             reason = f"changed since {prev}"
     elif mode == "all":
@@ -132,6 +134,15 @@ def main() -> int:
         if unknown:
             raise SystemExit(f"[resolve] unknown components: {sorted(unknown)}")
         reason = "forced"
+
+    # Qt CIP launcher ships inside the client/CDN bundle; do not build a Tauri slice.
+    if not tauri_version and "launcher" in selected:
+        if mode == "launcher" or (mode not in {"auto", "all", "assets"} and "launcher" in mode.split("+")):
+            raise SystemExit(
+                "[resolve] apps/launcher/package.json is gone — the Qt launcher ships with the client"
+            )
+        selected.discard("launcher")
+        print("::notice::Tauri launcher removed — Qt launcher ships with the client")
 
     out = {
         "ref": ref,

@@ -70,7 +70,9 @@ jobs:
           ref: ${{ env.SHA }}
           token: ${{ secrets.RELEASE_TOKEN }}
           persist-credentials: false
-          sparse-checkout: apps/launcher/package.json
+          sparse-checkout: |
+            apps/launcher/package.json
+            apps/web/package.json
           sparse-checkout-cone-mode: false
 
       - name: Login to GHCR
@@ -84,6 +86,14 @@ jobs:
         id: version
         run: |
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::portal_sha must be a full commit SHA"; exit 1; }
+          if [[ ! -f apps/launcher/package.json ]]; then
+            # Keep bundle.yml on launcher:latest (prior slice / empty). Never emit a
+            # fake :qt tag that cannot be extracted.
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tauri launcher removed — the Qt launcher ships with the client"
+            exit 0
+          fi
           version="$(jq -r .version apps/launcher/package.json)"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad launcher version '$version'"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"

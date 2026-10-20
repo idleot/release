@@ -344,6 +344,22 @@ def main() -> int:
     write_json(out / "latest" / "sources.json", sources)
     (out / "healthz").write_text("ok\n")
 
+    from cip_package import emit_cip
+
+    launcher_version = (sources.get("launcher") or {}).get("version") or "dev"
+    extra: list[Path] = []
+    launcher_root = out / "launcher"
+    if launcher_root.is_dir():
+        for path in launcher_root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(launcher_root).as_posix()
+            if rel == "latest.json" or rel.endswith("tibiametadata.json"):
+                continue
+            if path.parent == launcher_root and path.suffix.lower() in {".dmg", ".exe", ".appimage", ".zip"}:
+                extra.append(path)
+    emit_cip(out, cdn_url, str(launcher_version), extra)
+
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     print(f"[assemble] bundle {total / 1e6:.1f} MB → {out}")
     return 0
