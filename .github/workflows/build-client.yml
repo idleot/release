@@ -407,6 +407,56 @@ jobs:
           fi
           echo "launcher installer ok ($(wc -l < "$RUNNER_TEMP/launcher-pack.log") lines)"
 
+      # package_launcher.py only ad-hoc signs. Re-sign + notarize the downloadable
+      # IdleOT.app / .dmg when Developer ID secrets are present so Gatekeeper does
+      # not report "IdleOT.app is damaged" after a browser download.
+      - name: Developer ID sign and notarize launcher
+        if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          app="$RUNNER_TEMP/dist/installers/macos-arm64/IdleOT.app"
+          dmg="$RUNNER_TEMP/dist/installers/macos-arm64.dmg"
+          zip="$RUNNER_TEMP/dist/installers/macos-arm64.zip"
+          [[ -d "$app" ]] || { echo "::error::missing $app"; exit 1; }
+          keychain="$RUNNER_TEMP/launcher-signing.keychain-db"
+          kc_pass="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/launcher-cert.p12"
+          security create-keychain -p "$kc_pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$kc_pass" "$keychain"
+          security import "$RUNNER_TEMP/launcher-cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$kc_pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/launcher-cert.p12"
+          xattr -cr "$app"
+          codesign --force --deep --options runtime --timestamp \
+            --entitlements "$GITHUB_WORKSPACE/tools/publish/installer/idleot.entitlements" \
+            --sign "$MACOS_SIGN_IDENTITY" "$app"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/IdleOT-launcher.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/IdleOT-launcher.zip" --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$app"
+          # Rebuild downloadable archives from the notarized app (preserve symlinks).
+          ditto -c -k --keepParent "$app" "$zip"
+          stage="$RUNNER_TEMP/launcher-dmg-stage"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          ditto "$app" "$stage/IdleOT.app"
+          ln -s /Applications "$stage/Applications"
+          rm -f "$dmg"
+          hdiutil create -volname IdleOT -srcfolder "$stage" -ov -format UDZO "$dmg"
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$dmg"
+          rm -rf "$stage" "$RUNNER_TEMP/IdleOT-launcher.zip"
+          echo "launcher notarized: $(wc -c < "$dmg") byte dmg"
+
       - name: Upload store
         uses: actions/upload-artifact@v4
         with:
@@ -440,8 +490,17 @@ jobs:
             fi
           done
           for plat in windows-x64 macos-arm64 linux-x64; do
-            [[ -f "slice/installers/${plat}.zip" ]] || { echo "::error::missing installers/${plat}.zip"; exit 1; }
-            echo "installer ${plat}: $(wc -c < "slice/installers/${plat}.zip") bytes"
+            if [[ "$plat" == macos-arm64 ]]; then
+              [[ -f "slice/installers/${plat}.dmg" ]] || { echo "::error::missing installers/${plat}.dmg"; exit 1; }
+              echo "installer ${plat}: $(wc -c < "slice/installers/${plat}.dmg") byte dmg"
+              # Symlink-preserving zip is optional fallback for assemble.
+              if [[ -f "slice/installers/${plat}.zip" ]]; then
+                echo "installer ${plat} zip: $(wc -c < "slice/installers/${plat}.zip") bytes"
+              fi
+            else
+              [[ -f "slice/installers/${plat}.zip" ]] || { echo "::error::missing installers/${plat}.zip"; exit 1; }
+              echo "installer ${plat}: $(wc -c < "slice/installers/${plat}.zip") bytes"
+            fi
           done
           python3 - <<'PY'
           import json, pathlib

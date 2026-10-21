@@ -339,29 +339,49 @@ def emit_cip(
                     shutil.copy2(image, target)
 
     # /download reads latest/desktop.json — ship real launcher archives, not CIP metadata.
+    # macOS must be a DMG (or ditto zip) so Qt framework symlinks survive; Python
+    # zipfile flattens them and Gatekeeper then reports IdleOT.app as "damaged".
     platforms_out: dict = {}
     for key, plat in DESKTOP_JSON_KEYS.items():
-        prebuilt = out / "installers" / f"{plat}.zip"
-        archive = out / "launcher" / f"IdleOT-{plat}.zip"
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        if prebuilt.is_file():
-            shutil.copy2(prebuilt, archive)
+        archive_dir = out / "launcher"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        fmt = "zip"
+        archive = archive_dir / f"IdleOT-{plat}.zip"
+        prebuilt_dmg = out / "installers" / f"{plat}.dmg"
+        prebuilt_zip = out / "installers" / f"{plat}.zip"
+        if plat == "macos-arm64" and prebuilt_dmg.is_file():
+            archive = archive_dir / f"IdleOT-{plat}.dmg"
+            shutil.copy2(prebuilt_dmg, archive)
+            fmt = "dmg"
+        elif prebuilt_zip.is_file():
+            shutil.copy2(prebuilt_zip, archive)
         else:
             tree = out / "installers" / plat
             if not tree.is_dir():
                 print(f"[assemble] warning: no installer for {plat} — omitted from desktop.json")
                 continue
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for path in sorted(tree.rglob("*")):
-                    if path.is_file():
-                        zf.write(path, path.relative_to(tree).as_posix())
+            if plat == "macos-arm64":
+                app = tree / "IdleOT.app"
+                if not app.is_dir():
+                    print(f"[assemble] warning: no IdleOT.app under {tree} — omitted")
+                    continue
+                # ditto keeps framework symlinks; never use zipfile on .app trees.
+                subprocess.run(
+                    ["ditto", "-c", "-k", "--keepParent", str(app), str(archive)],
+                    check=True,
+                )
+            else:
+                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for path in sorted(tree.rglob("*")):
+                        if path.is_file():
+                            zf.write(path, path.relative_to(tree).as_posix())
         data = archive.read_bytes()
         platforms_out[key] = {
             "url": f"launcher/{archive.name}",
             "size": len(data),
             "sha256": sha256_bytes(data),
             "file": archive.name,
-            "format": "zip",
+            "format": fmt,
         }
     if platforms_out:
         write_json(out / "latest" / "desktop.json", {
