@@ -290,11 +290,37 @@ def main() -> int:
     write_json(out / "latest" / "update.json", RETIRED_UPDATE)
     things = next((t["things"] for t in prev_release.get("targets", {}).values() if t.get("things")), None)
     if assets:
-        # The assets slice is authoritative for assets/.
+        # The assets slice is authoritative for assets/ (store/outfits/items) and
+        # usually for content-things. When assetsRevision matches the previous tip
+        # and launcher/assets-current was pulled from the host, reuse the CIP tip
+        # and skip re-importing/re-lzma'ing multi-GB sprites.
         shutil.rmtree(out / "assets", ignore_errors=True)
         copy_tree(assets / "assets", out / "assets")
-        sources["assets"] = load_json(assets / ".idleot" / "assets.json") or sources["assets"]
-        things = import_things(assets, out) or things
+        new_assets = load_json(assets / ".idleot" / "assets.json") or {}
+        sources["assets"] = new_assets or sources["assets"]
+        prev_sources = (load_json(previous / "latest" / "sources.json") if previous else None) or {}
+        prev_assets_rev = ((prev_sources.get("assets") or {}).get("assetsRevision") or "")
+        new_assets_rev = new_assets.get("assetsRevision") or ""
+        prev_tip = (
+            previous / "launcher" / "assets-current" / "assets.json" if previous else None
+        )
+        if (
+            previous
+            and new_assets_rev
+            and new_assets_rev == prev_assets_rev
+            and prev_tip is not None
+            and prev_tip.is_file()
+        ):
+            print(f"[assemble] assets tip unchanged ({new_assets_rev}) — reuse assets-current")
+            copy_tree(previous / "launcher" / "assets-current", out / "launcher" / "assets-current")
+            if things and (previous / things).is_file():
+                dest = out / things
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(previous / things, dest)
+            (out / ".idleot").mkdir(parents=True, exist_ok=True)
+            (out / ".idleot" / "reuse-assets").write_text(new_assets_rev + "\n")
+        else:
+            things = import_things(assets, out) or things
     for name in THINGS_TARGETS:
         if name in release["targets"]:
             if things:

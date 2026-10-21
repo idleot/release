@@ -262,11 +262,24 @@ jobs:
         run: |
           # Redeploy BEFORE flip. Coolify dockerimage deploys have dropped the
           # host volume mount before; we verify the mount before flipping tip.
+          # Coolify often reports "finished" before the container is listed —
+          # poll verify-mount (v1.0.62 failed on a 10s race).
           export CDN_SSH_USER="${CDN_SSH_USER:-root}"
           [[ -n "${COOLIFY_CDN_UUID:-}" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
           [[ -n "$CDN_SSH_HOST" && -n "$CDN_SSH_KEY" ]] || {
             echo "::error::set CDN_SSH_HOST and CDN_SSH_KEY secrets for volume sync"
             exit 1
+          }
+          wait_mount() {
+            local i
+            for i in $(seq 1 36); do
+              if bash scripts/sync-cdn.sh verify-mount; then
+                return 0
+              fi
+              echo "[coolify] waiting for cdn container/mount (${i}/36)..."
+              sleep 5
+            done
+            return 1
           }
           live="$(bash scripts/deployctl get-image cdn || true)"
           if [[ "$live" == "$RUNTIME_TAG" || "$live" == "runtime" ]]; then
@@ -274,11 +287,10 @@ jobs:
           else
             bash scripts/deployctl deploy cdn "$RUNTIME_TAG"
           fi
-          if ! bash scripts/sync-cdn.sh verify-mount; then
+          if ! wait_mount; then
             echo "::warning::volume mount missing after deploy — restarting once"
             bash scripts/deployctl deploy cdn || true
-            sleep 10
-            bash scripts/sync-cdn.sh verify-mount
+            wait_mount
           fi
       - name: Flip latest/ on host volume
         run: |

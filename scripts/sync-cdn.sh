@@ -9,8 +9,9 @@
 # Env (required):
 #   CDN_SSH_HOST   e.g. idleot.com
 #   CDN_SSH_USER   default root
-#   CDN_SSH_KEY    private key PEM (secret)
 # Optional:
+#   CDN_SSH_KEY      private key PEM (CI secret). When unset, uses the local
+#                    ssh agent / default identity (BatchMode).
 #   CDN_REMOTE_ROOT  default /data/idleot-cdn
 #
 # Host volume is source of truth. content/packs/client/<rev>/launcher/<ver>
@@ -28,16 +29,21 @@ cmd="${1:-}"
 shift || true
 
 setup_ssh() {
-  : "${CDN_SSH_KEY:?}"
-  umask 077
-  printf '%s\n' "$CDN_SSH_KEY" > "$KEY_FILE"
-  if ! grep -q 'BEGIN .*PRIVATE KEY' "$KEY_FILE"; then
-    echo "::error::CDN_SSH_KEY does not look like a PEM private key"
-    exit 1
+  if [[ -n "${CDN_SSH_KEY:-}" ]]; then
+    umask 077
+    printf '%s\n' "$CDN_SSH_KEY" > "$KEY_FILE"
+    if ! grep -q 'BEGIN .*PRIVATE KEY' "$KEY_FILE"; then
+      echo "::error::CDN_SSH_KEY does not look like a PEM private key"
+      exit 1
+    fi
+    SSH=(ssh -i "$KEY_FILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+      -o BatchMode=yes "${CDN_SSH_USER}@${CDN_SSH_HOST}")
+    RSYNC_SSH="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+  else
+    echo "[sync-cdn] CDN_SSH_KEY unset — using default ssh identity for ${CDN_SSH_USER}@${CDN_SSH_HOST}"
+    SSH=(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "${CDN_SSH_USER}@${CDN_SSH_HOST}")
+    RSYNC_SSH="ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
   fi
-  SSH=(ssh -i "$KEY_FILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
-    -o BatchMode=yes "${CDN_SSH_USER}@${CDN_SSH_HOST}")
-  RSYNC_SSH="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
 }
 
 remote() { "${SSH[@]}" "$@"; }
@@ -89,12 +95,15 @@ echo "[sync-cdn] verify ok (mount\${REQUIRE_RELEASE:+ + release.json})"
 EOF
 }
 
+# macOS ships an older rsync without --info=stats2; --stats works everywhere.
+RSYNC_STATS=(--stats)
+
 # Immutable trees: skip files already on the host (digest/version paths).
 push_immutable() {
   local name="$1"
   [[ -d "${site}/${name}" ]] || return 0
   remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
-  rsync -a --ignore-existing --info=stats2 -e "$RSYNC_SSH" \
+  rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
     "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
 }
 
@@ -103,7 +112,7 @@ push_mutable() {
   local name="$1"
   [[ -d "${site}/${name}" ]] || return 0
   remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
-  rsync -a --info=stats2 -e "$RSYNC_SSH" \
+  rsync -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
     "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
 }
 
@@ -112,14 +121,34 @@ replace_tree() {
   local name="$1"
   [[ -d "${site}/${name}" ]] || return 0
   remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
-  rsync -a --delete --info=stats2 -e "$RSYNC_SSH" \
+  rsync -a --delete "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
     "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
 }
 
 push_blobs() {
-  for d in content packs client launcher; do
+  for d in content packs client; do
     push_immutable "$d"
   done
+  # launcher/<ver>/ packages are versioned (ignore-existing). The live CIP tip
+  # launcher/assets-current/ must overwrite when sprites/assetsRevision move.
+  if [[ -d "${site}/launcher" ]]; then
+    remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher'"
+    # Versioned launcher builds (launcher-*-current, IdleOT-*, numbered dirs).
+    for child in "${site}/launcher"/*; do
+      [[ -e "$child" ]] || continue
+      name="$(basename "$child")"
+      if [[ "$name" == "assets-current" ]]; then
+        replace_tree "launcher/assets-current"
+      elif [[ -d "$child" ]]; then
+        remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher/${name}'"
+        rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+          "${child}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/${name}/"
+      else
+        rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+          "$child" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/"
+      fi
+    done
+  fi
   for d in installers assets images; do
     push_mutable "$d"
   done

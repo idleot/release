@@ -115,7 +115,8 @@ jobs:
           CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
           CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
         run: |
-          # Only latest/ + releases/ (~MBs). Blobs and client/launcher trees stay on the host.
+          # latest/ + releases/ (~MBs) + launcher/assets-current tip (reuse when
+          # assetsRevision unchanged — avoids re-lzma of sprites). Blobs stay on host.
           mkdir -p slices/previous
           CDN_SSH_USER="${CDN_SSH_USER:-root}"
           if [[ -n "${CDN_SSH_HOST:-}" && -n "${CDN_SSH_KEY:-}" ]]; then
@@ -128,6 +129,11 @@ jobs:
                 "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${d}/" "slices/previous/${d}/" \
                 || echo "::warning::no remote ${d}/ — assembling without it"
             done
+            mkdir -p slices/previous/launcher
+            rsync -a -e "$RSYNC_SSH" \
+              "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/assets-current/" \
+              "slices/previous/launcher/assets-current/" \
+              || echo "::warning::no remote launcher/assets-current/ — will re-pack assets"
             # Optional tip-of-day root file for continuity.
             rsync -a -e "$RSYNC_SSH" \
               "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/hints.json" slices/previous/hints.json \

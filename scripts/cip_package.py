@@ -84,11 +84,46 @@ def _link_or_copy(src: Path, dest: Path) -> None:
         shutil.copy2(src, dest)
 
 
-def pack_file(out: Path, package_dir: Path, blob: Path, localfile: str) -> dict | None:
+def _unpacked_map_from_assets(assets_json: Path) -> dict[str, dict]:
+    """Map unpackedhash → prior CIP file record (skip re-lzma when tip reused)."""
+    doc = load_json(assets_json) or {}
+    out: dict[str, dict] = {}
+    for rec in doc.get("files") or []:
+        uh = rec.get("unpackedhash")
+        if uh:
+            out[uh] = rec
+    return out
+
+
+def pack_file(
+    out: Path,
+    package_dir: Path,
+    blob: Path,
+    localfile: str,
+    *,
+    prior_by_unpacked: dict[str, dict] | None = None,
+) -> dict | None:
     """lzma-compress one unpacked blob. Returns a CIP file record, or None if missing."""
     if not blob.is_file():
         return None
     data = blob.read_bytes()
+    unpacked_hash = sha256_bytes(data)
+    prior = (prior_by_unpacked or {}).get(unpacked_hash)
+    if prior and prior.get("packedhash"):
+        packed_hash = prior["packedhash"]
+        canon = out / "content" / packed_hash[:2] / packed_hash
+        if canon.is_file():
+            rel = localfile.lstrip("/") + ".lzma"
+            _link_or_copy(canon, package_dir / rel)
+            return {
+                "url": rel,
+                "localfile": localfile.lstrip("/"),
+                "packedhash": packed_hash,
+                "packedsize": int(prior.get("packedsize") or canon.stat().st_size),
+                "unpackedhash": unpacked_hash,
+                "unpackedsize": len(data),
+            }
+
     packed = lzma.compress(data, format=lzma.FORMAT_ALONE)
     packed_hash = sha256_bytes(packed)
     canon = out / "content" / packed_hash[:2] / packed_hash
@@ -102,7 +137,7 @@ def pack_file(out: Path, package_dir: Path, blob: Path, localfile: str) -> dict 
         "localfile": localfile.lstrip("/"),
         "packedhash": packed_hash,
         "packedsize": len(packed),
-        "unpackedhash": sha256_bytes(data),
+        "unpackedhash": unpacked_hash,
         "unpackedsize": len(data),
     }
 
@@ -113,6 +148,7 @@ def records_from_list(out: Path, package_dir: Path, list_rel: str | None) -> lis
     doc = load_json(out / list_rel)
     if not doc:
         return []
+    prior = _unpacked_map_from_assets(out / "launcher" / "assets-current" / "assets.json")
     records: list[dict] = []
     files = doc.get("files", {})
     for index, (path, entry) in enumerate(files.items(), start=1):
@@ -120,7 +156,7 @@ def records_from_list(out: Path, package_dir: Path, list_rel: str | None) -> lis
             print(f"[assemble] CIP {package_dir.name} {index}/{len(files)} {path}")
         digest = entry.get("sha256", "")
         blob = out / "content" / digest[:2] / digest
-        rec = pack_file(out, package_dir, blob, path.lstrip("/"))
+        rec = pack_file(out, package_dir, blob, path.lstrip("/"), prior_by_unpacked=prior)
         if rec:
             records.append(rec)
         else:
@@ -213,12 +249,24 @@ def emit_cip(
     things_rel = next((t.get("things") for t in targets.values() if t.get("things")), None)
 
     assets_dir = out / "launcher" / "assets-current"
-    asset_files = records_from_list(out, assets_dir, things_rel)
-    assets_doc = {"files": asset_files}
-    write_json(assets_dir / "assets.json", assets_doc)
-    assets_bytes = (assets_dir / "assets.json").read_bytes()
-    (assets_dir / "assets.json.sha256").write_text(sha256_bytes(assets_bytes))
-    write_json(assets_dir / "assets-macos.json", assets_doc)
+    reuse_marker = out / ".idleot" / "reuse-assets"
+    if reuse_marker.is_file() and (assets_dir / "assets.json").is_file():
+        # Host/previous tip already has packed assets — do not re-lzma.
+        print(f"[assemble] CIP assets-current reused ({reuse_marker.read_text().strip() or 'unchanged'})")
+        assets_doc = load_json(assets_dir / "assets.json") or {"files": []}
+        if not (assets_dir / "assets-macos.json").is_file():
+            write_json(assets_dir / "assets-macos.json", assets_doc)
+        if not (assets_dir / "assets.json.sha256").is_file():
+            (assets_dir / "assets.json.sha256").write_text(
+                sha256_bytes((assets_dir / "assets.json").read_bytes())
+            )
+    else:
+        asset_files = records_from_list(out, assets_dir, things_rel)
+        assets_doc = {"files": asset_files}
+        write_json(assets_dir / "assets.json", assets_doc)
+        assets_bytes = (assets_dir / "assets.json").read_bytes()
+        (assets_dir / "assets.json.sha256").write_text(sha256_bytes(assets_bytes))
+        write_json(assets_dir / "assets-macos.json", assets_doc)
 
     # CIP shows 15.33.c9e45e under Play — not a long dated/branch stamp.
     version = cip_package_version(release.get("revision") or "0")
