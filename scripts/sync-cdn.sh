@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # Rsync an assembled CDN delta onto the Coolify host volume.
-#   sync-cdn.sh push <site-dir>     # merge blobs + flip manifests
+#   sync-cdn.sh blobs <site-dir>    # upload immutable trees (safe before gate)
+#   sync-cdn.sh flip <site-dir>     # replace latest/ + releases/ (after gate)
+#   sync-cdn.sh push <site-dir>     # blobs + flip
 #   sync-cdn.sh rollback            # restore previous latest/ snapshot on host
 #
-# Env (required for push/rollback):
+# Env (required):
 #   CDN_SSH_HOST   e.g. idleot.com
 #   CDN_SSH_USER   default root
 #   CDN_SSH_KEY    private key PEM (secret)
 # Optional:
 #   CDN_REMOTE_ROOT  default /data/idleot-cdn
 #
-# Host volume is source of truth for large trees. CI only uploads what this
-# assemble produced; we never --delete under content/ packs/ client/ launcher/
-# installers/ assets/ images/. Only latest/ and releases/ are replaced.
+# Host volume is source of truth. content/packs/client/<rev>/launcher/<ver>
+# are content-addressed or versioned — --ignore-existing so re-extracts with
+# fresh mtimes do not re-upload multi-GB trees. latest/ and releases/ flip
+# live traffic and use --delete.
 set -euo pipefail
 
 : "${CDN_SSH_HOST:?}"
@@ -47,8 +50,17 @@ fi
 EOF
 }
 
-# Additive merge of one directory tree (no --delete).
-push_tree() {
+# Immutable trees: skip files already on the host (digest/version paths).
+push_immutable() {
+  local name="$1"
+  [[ -d "${site}/${name}" ]] || return 0
+  remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
+  rsync -a --ignore-existing --info=stats2 -e "$RSYNC_SSH" \
+    "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
+}
+
+# Mutable trees: update in place (no --delete of extras).
+push_mutable() {
   local name="$1"
   [[ -d "${site}/${name}" ]] || return 0
   remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
@@ -63,6 +75,15 @@ replace_tree() {
   remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
   rsync -a --delete --info=stats2 -e "$RSYNC_SSH" \
     "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
+}
+
+push_blobs() {
+  for d in content packs client launcher; do
+    push_immutable "$d"
+  done
+  for d in installers assets images; do
+    push_mutable "$d"
+  done
 }
 
 # Drop host client/<rev> and launcher/<ver> not listed in this assemble's history.
@@ -98,17 +119,13 @@ prune_one launcher ${launcher_keep}
 EOF
 }
 
-case "$cmd" in
-  push)
-    site="${1:?site directory}"
-    [[ -d "$site" ]] || { echo "::error::missing site dir $site"; exit 1; }
-    [[ -f "$site/latest/release.json" ]] || { echo "::error::missing $site/latest/release.json"; exit 1; }
-    setup_ssh
-    remote "mkdir -p '${CDN_REMOTE_ROOT}/html' '${CDN_REMOTE_ROOT}/previous-latest'"
+flip_manifests() {
+  [[ -f "$site/latest/release.json" ]] || { echo "::error::missing $site/latest/release.json"; exit 1; }
 
-    remote bash -s <<EOF
+  remote bash -s <<EOF
 set -euo pipefail
 ROOT='${CDN_REMOTE_ROOT}'
+mkdir -p "\$ROOT/html" "\$ROOT/previous-latest"
 if [[ -d "\$ROOT/html/latest" ]]; then
   rm -rf "\$ROOT/previous-latest"
   mkdir -p "\$ROOT/previous-latest"
@@ -116,24 +133,43 @@ if [[ -d "\$ROOT/html/latest" ]]; then
 fi
 EOF
 
-    # Large / content-addressed trees: merge only.
-    for d in content packs client launcher installers assets images; do
-      push_tree "$d"
-    done
+  replace_tree latest
+  replace_tree releases
 
-    # Manifests: full replace so stale release JSON and latest pointers go away.
-    replace_tree latest
-    replace_tree releases
+  for f in healthz hints.json; do
+    if [[ -f "${site}/${f}" ]]; then
+      rsync -a -e "$RSYNC_SSH" "${site}/${f}" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${f}"
+    fi
+  done
 
-    # Root tip-of-day files.
-    for f in healthz hints.json; do
-      if [[ -f "${site}/${f}" ]]; then
-        rsync -a -e "$RSYNC_SSH" "${site}/${f}" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${f}"
-      fi
-    done
+  prune_host_history
+  reload_nginx
+}
 
-    prune_host_history
-    reload_nginx
+case "$cmd" in
+  blobs)
+    site="${1:?site directory}"
+    [[ -d "$site" ]] || { echo "::error::missing site dir $site"; exit 1; }
+    setup_ssh
+    remote "mkdir -p '${CDN_REMOTE_ROOT}/html'"
+    push_blobs
+    echo "[sync-cdn] blobs ok"
+    ;;
+  flip)
+    site="${1:?site directory}"
+    [[ -d "$site" ]] || { echo "::error::missing site dir $site"; exit 1; }
+    setup_ssh
+    flip_manifests
+    echo "[sync-cdn] flip ok"
+    ;;
+  push)
+    site="${1:?site directory}"
+    [[ -d "$site" ]] || { echo "::error::missing site dir $site"; exit 1; }
+    [[ -f "$site/latest/release.json" ]] || { echo "::error::missing $site/latest/release.json"; exit 1; }
+    setup_ssh
+    remote "mkdir -p '${CDN_REMOTE_ROOT}/html'"
+    push_blobs
+    flip_manifests
     echo "[sync-cdn] push ok"
     ;;
   rollback)
@@ -150,7 +186,7 @@ EOF
     echo "[sync-cdn] rollback ok"
     ;;
   *)
-    echo "usage: sync-cdn.sh push <site-dir> | rollback" >&2
+    echo "usage: sync-cdn.sh blobs|flip|push <site-dir> | rollback" >&2
     exit 2
     ;;
 esac

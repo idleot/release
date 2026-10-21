@@ -270,19 +270,20 @@ jobs:
       CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
     steps:
       - uses: actions/checkout@v5
-      - name: Download site tree
+      - name: Download manifests
         uses: actions/download-artifact@v4
         with:
           name: cdn-site-${{ env.BUNDLE_TAG }}
           path: site
-      - name: Rsync site to host volume
+      - name: Flip latest/ on host volume
         run: |
+          # Blobs were uploaded in Bundle (pre-gate). This only replaces manifests.
           export CDN_SSH_USER="${CDN_SSH_USER:-root}"
           [[ -n "$CDN_SSH_HOST" && -n "$CDN_SSH_KEY" ]] || {
             echo "::error::set CDN_SSH_HOST and CDN_SSH_KEY secrets for volume sync"
             exit 1
           }
-          bash scripts/sync-cdn.sh push site
+          bash scripts/sync-cdn.sh flip site
       - name: Point idleot-cdn at thin runtime (if changed)
         run: |
           [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }

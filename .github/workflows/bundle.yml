@@ -167,6 +167,22 @@ jobs:
             echo "::warning::Bundle is ${size_mb} MB — GitHub Pages caps published sites at 1 GB"
           fi
 
+      - name: Upload blobs to host (pre-gate)
+        if: contains(env.TARGETS, 'image')
+        env:
+          CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+          CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+          CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
+          CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
+        run: |
+          # Safe before the gate: does not touch latest/. Live clients keep old manifests.
+          export CDN_SSH_USER="${CDN_SSH_USER:-root}"
+          [[ -n "${CDN_SSH_HOST:-}" && -n "${CDN_SSH_KEY:-}" ]] || {
+            echo "::error::set CDN_SSH_HOST and CDN_SSH_KEY for volume sync"
+            exit 1
+          }
+          bash scripts/sync-cdn.sh blobs site
+
       - name: Release revision
         id: revision
         run: |
@@ -200,13 +216,24 @@ jobs:
             ${{ env.REGISTRY }}/cdn:${{ steps.runtime.outputs.tag }}
             ${{ env.REGISTRY }}/cdn:runtime
 
-      - name: Upload site artifact
+      # Manifests only (~MBs). Blobs already on the host from the pre-gate step.
+      - name: Stage manifests artifact
+        if: contains(env.TARGETS, 'image')
+        run: |
+          mkdir -p manifests
+          cp -a site/latest manifests/
+          cp -a site/releases manifests/
+          cp -a site/healthz manifests/
+          [[ -f site/hints.json ]] && cp -a site/hints.json manifests/
+      - name: Upload manifests artifact
+        if: contains(env.TARGETS, 'image')
         uses: actions/upload-artifact@v4
         with:
           name: cdn-site-${{ steps.meta.outputs.tag }}
-          path: site
+          path: manifests
           include-hidden-files: true
           retention-days: 2
+          if-no-files-found: error
 
       - name: Upload Pages artifact
         if: contains(env.TARGETS, 'pages')

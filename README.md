@@ -41,8 +41,9 @@ intentionally want the release to compile.
 - **CDN** — thin `ghcr.io/idleot/cdn:runtime-*` (nginx + config). The site tree
   lives on the Coolify host at `/data/idleot-cdn/html` (source of truth for
   blobs). Bundle pulls only `latest/` + `releases/` into CI, assembles deltas,
-  then `sync-cdn.sh` merges content/packs/client/launcher additively and
-  replaces `latest/` + `releases/`. Coolify mounts the volume read-only.
+  uploads immutable blobs with `sync-cdn.sh blobs` (pre-gate,
+  `--ignore-existing`), then after the gate Deploy CDN runs `sync-cdn.sh flip`
+  for `latest/` + `releases/` only. Coolify mounts the volume read-only.
 - **Auto rollback** — restores server/portal Coolify tags and
   `sync-cdn.sh rollback` for `latest/` on the volume.
 - **Stuck closed:** `SITE_URL=https://www.idleot.com RELEASE_GATE_TOKEN=... bash scripts/gate.sh open`.
