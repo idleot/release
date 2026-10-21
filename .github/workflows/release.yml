@@ -275,18 +275,16 @@ jobs:
         with:
           name: cdn-site-${{ env.BUNDLE_TAG }}
           path: site
-      - name: Flip latest/ on host volume
+      - name: Point idleot-cdn at thin runtime (if changed)
         run: |
-          # Blobs were uploaded in Bundle (pre-gate). This only replaces manifests.
+          # Redeploy BEFORE flip. Coolify dockerimage deploys have dropped the
+          # host volume mount before; we verify the mount before flipping tip.
           export CDN_SSH_USER="${CDN_SSH_USER:-root}"
+          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
           [[ -n "$CDN_SSH_HOST" && -n "$CDN_SSH_KEY" ]] || {
             echo "::error::set CDN_SSH_HOST and CDN_SSH_KEY secrets for volume sync"
             exit 1
           }
-          bash scripts/sync-cdn.sh flip site
-      - name: Point idleot-cdn at thin runtime (if changed)
-        run: |
-          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
           live="$(bash scripts/coolify.sh get-image "$APP" || true)"
           if [[ "$live" == "$RUNTIME_TAG" || "$live" == "runtime" ]]; then
             echo "[coolify] runtime already ${live} — skip image deploy"
@@ -294,13 +292,32 @@ jobs:
             bash scripts/coolify.sh image "$APP" "$RUNTIME_TAG"
             bash scripts/coolify.sh deploy "$APP"
           fi
+          if ! bash scripts/sync-cdn.sh verify-mount; then
+            echo "::warning::volume mount missing after deploy — restarting once"
+            bash scripts/coolify.sh deploy "$APP" || true
+            sleep 10
+            bash scripts/sync-cdn.sh verify-mount
+          fi
+      - name: Flip latest/ on host volume
+        run: |
+          # Blobs were uploaded in Bundle (pre-gate). This only replaces manifests.
+          export CDN_SSH_USER="${CDN_SSH_USER:-root}"
+          bash scripts/sync-cdn.sh flip site
+          bash scripts/sync-cdn.sh verify
       - name: Wait for the CDN
         run: |
           for _ in $(seq 1 30); do
-            curl -fsS -o /dev/null "$CDN_URL/latest/release.json" && { echo "cdn up"; exit 0; }
+            if curl -fsS -o /dev/null "$CDN_URL/latest/release.json"; then
+              echo "cdn up"
+              exit 0
+            fi
             sleep 5
           done
-          echo "::error::CDN did not serve latest/release.json"; exit 1
+          echo "::error::CDN did not serve latest/release.json (public URL)"
+          echo "::error::host/mount check:"
+          export CDN_SSH_USER="${CDN_SSH_USER:-root}"
+          bash scripts/sync-cdn.sh verify || true
+          exit 1
 
   deploy-server:
     name: Deploy server

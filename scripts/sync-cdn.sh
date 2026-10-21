@@ -3,6 +3,7 @@
 #   sync-cdn.sh blobs <site-dir>    # upload immutable trees (safe before gate)
 #   sync-cdn.sh flip <site-dir>     # replace latest/ + releases/ (after gate)
 #   sync-cdn.sh push <site-dir>     # blobs + flip
+#   sync-cdn.sh verify              # host tree + docker volume mount healthy
 #   sync-cdn.sh rollback            # restore previous latest/ snapshot on host
 #
 # Env (required):
@@ -47,6 +48,44 @@ cid="\$(docker ps --format '{{.ID}} {{.Names}}' | awk '/idleot-cdn|cdn/ {print \
 if [[ -n "\$cid" ]]; then
   docker exec "\$cid" nginx -s reload 2>/dev/null || true
 fi
+EOF
+}
+
+# Fail fast when Coolify started the thin image without the host volume mount
+# (serves stock nginx welcome + baked /healthz, 404 on /latest/*).
+# require_release=1 also demands latest/release.json on host and in the container.
+verify_cdn() {
+  local require_release="${1:-1}"
+  remote bash -s <<EOF
+set -euo pipefail
+HTML='${CDN_REMOTE_ROOT}/html'
+REQUIRE_RELEASE='${require_release}'
+cid="\$(docker ps --format '{{.ID}} {{.Names}}' | awk '/idleot-cdn|cdn/ {print \$1; exit}')"
+if [[ -z "\$cid" ]]; then
+  echo "::error::no running idleot-cdn container"
+  exit 1
+fi
+mount_ok="\$(docker inspect "\$cid" --format '{{range .Mounts}}{{println .Source .Destination}}{{end}}' \
+  | awk '\$2 == "/usr/share/nginx/html" && \$1 ~ /idleot-cdn/ {print "yes"; exit}')"
+if [[ "\$mount_ok" != "yes" ]]; then
+  echo "::error::cdn container is not mounting ${CDN_REMOTE_ROOT}/html at /usr/share/nginx/html"
+  echo "::error::Coolify custom_docker_run_options must include: -v ${CDN_REMOTE_ROOT}/html:/usr/share/nginx/html:ro"
+  echo "::error::Redeploy often drops the mount — restart the app after setting run options."
+  docker inspect "\$cid" --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}' || true
+  exit 1
+fi
+if [[ "\$REQUIRE_RELEASE" == "1" ]]; then
+  if [[ ! -f "\$HTML/latest/release.json" ]]; then
+    echo "::error::host missing \$HTML/latest/release.json — flip/blobs did not land"
+    ls -la "\$HTML" 2>/dev/null || true
+    exit 1
+  fi
+  if ! docker exec "\$cid" test -f /usr/share/nginx/html/latest/release.json; then
+    echo "::error::volume mounted but container cannot see latest/release.json"
+    exit 1
+  fi
+fi
+echo "[sync-cdn] verify ok (mount\${REQUIRE_RELEASE:+ + release.json})"
 EOF
 }
 
@@ -185,8 +224,16 @@ EOF
     reload_nginx
     echo "[sync-cdn] rollback ok"
     ;;
+  verify-mount)
+    setup_ssh
+    verify_cdn 0
+    ;;
+  verify)
+    setup_ssh
+    verify_cdn 1
+    ;;
   *)
-    echo "usage: sync-cdn.sh blobs|flip|push <site-dir> | rollback" >&2
+    echo "usage: sync-cdn.sh blobs|flip|push <site-dir> | verify|verify-mount | rollback" >&2
     exit 2
     ;;
 esac

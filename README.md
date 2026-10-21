@@ -112,6 +112,36 @@ documents Coolify `custom_docker_run_options`:
 `-v /data/idleot-cdn/html:/usr/share/nginx/html:ro`. Set Coolify
 **concurrent builds ≥ 3** so server/portal/CDN can flip together.
 
+## Binary pack / update contract (CIP)
+
+Desktop and browser share one tip protocol (see
+[`docs/reverse-engineering/tibia-launcher-packaging.md`](../../docs/reverse-engineering/tibia-launcher-packaging.md)):
+
+| Layer | CDN path | Installer |
+|-------|----------|-----------|
+| Launcher binary | `launcher/launcher-*-current/` | Bootstrap / first run |
+| Client engine | `launcher/tibiaclient-*-current/` + `content/` | Launcher `installPackage` |
+| Things / assets | `launcher/assets-current/` + `content/` (+ `/packs` zips on web) | Launcher `installAssets` / things packs **before Play** |
+| Live tip | `latest/release.json`, `tibiametadata.json` | Gate flip only |
+
+`emit_cip` (during Bundle assemble) writes `tibiametadata.json` for
+`windows` / `macos` / `linux` / `web`. Payloads are lzma-alone, content-addressed
+under `content/<aa>/<sha>`. Version stamps: `package.json.version` and
+`assets.json.sha256`.
+
+Release path for binaries:
+
+```text
+warm GHCR → tag → resolve → assemble+emit_cip
+  → sync-cdn blobs (pre-gate) → close gate
+  → sync-cdn flip latest/releases → open gate
+```
+
+- **Desktop:** `tibia-desktop` + installers → `tibiaclient-{windows,macos,linux}-current`
+- **Browser:** `otclient-wasm` → `tibiaclient-web-current` + `launcher-web-current`
+- **Things:** shared `assets-current` + packs for all platforms
+- Portal `/play` and the desktop launcher both read `/launcher/tibiametadata.json` only
+
 ## Desktop launcher
 
 The Qt launcher ships with the client/CDN bundle. Installers are listed by
