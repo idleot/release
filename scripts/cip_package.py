@@ -322,20 +322,31 @@ def emit_cip(
         "hints": f"{cdn_url}/hints.json",
     }
     write_json(out / "launcher" / "tibiametadata.json", metadata)
+    # Prefer release-vendored tips (idleot/release CI has no otclient/ tree), then
+    # monorepo apps/otclient/data, then whatever --previous already put in out/.
+    release_root = Path(__file__).resolve().parents[1]
+    hint_candidates = (
+        release_root / "vendor" / "launcher-hints" / "hints.json",
+        Path(__file__).resolve().parents[2] / "otclient" / "data" / "hints.json",
+    )
     hints = out / "hints.json"
-    vendored = Path(__file__).resolve().parents[2] / "otclient" / "data" / "hints.json"
-    if vendored.is_file():
-        hints.write_bytes(vendored.read_bytes())
+    vendored_hints = next((p for p in hint_candidates if p.is_file()), None)
+    if vendored_hints is not None:
+        hints.write_bytes(vendored_hints.read_bytes())
     elif not hints.is_file():
         write_json(hints, {"hints": ["Welcome to IdleOT."]})
-    news = vendored.parent / "images" / "news"
-    if news.is_dir():
+    news_candidates = (
+        release_root / "vendor" / "launcher-hints" / "images" / "news",
+        Path(__file__).resolve().parents[2] / "otclient" / "data" / "images" / "news",
+    )
+    news = next((p for p in news_candidates if p.is_dir()), None)
+    if news is not None:
         dest = out / "images" / "news"
         dest.mkdir(parents=True, exist_ok=True)
         for image in news.iterdir():
             if image.is_file():
                 target = dest / image.name
-                if not target.exists():
+                if not target.exists() or target.stat().st_size != image.stat().st_size:
                     shutil.copy2(image, target)
 
     # /download reads latest/desktop.json — ship real launcher archives, not CIP metadata.

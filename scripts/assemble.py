@@ -259,8 +259,12 @@ def main() -> int:
     }
 
     if previous:
-        for name in ("client", "assets", "releases", "content", "packs", "launcher", "installers"):
+        for name in ("client", "assets", "releases", "content", "packs", "launcher", "installers", "images"):
             copy_tree(previous / name, out / name)
+        # Tip-of-the-day feed (CIP /hints.json); emit_cip overwrites when vendored.
+        prev_hints = previous / "hints.json"
+        if prev_hints.is_file():
+            shutil.copy2(prev_hints, out / "hints.json")
 
     prev_release = (load_json(previous / "latest" / "release.json") if previous else None) or {}
     release: dict = {
