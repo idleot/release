@@ -24,9 +24,12 @@ import json
 import lzma
 import os
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+OTC = Path(__file__).resolve().parents[2] / "otclient"
 
 # (os, architecture field, v3 engine target or "web", launcher dir, client dir)
 PLATFORMS = (
@@ -125,6 +128,34 @@ def records_from_list(out: Path, package_dir: Path, list_rel: str | None) -> lis
     return records
 
 
+def cip_package_version(fallback: str = "0") -> str:
+    """CIP Play-button stamp: `<cip_version>.<6 hex>` (e.g. 15.33.c9e45e).
+
+    Content-store revisions stay dated elsewhere; only the launcher-facing
+    package.json.version uses this short form so it fits CIP's package chrome.
+    """
+    cip = "15.33"
+    version_json = OTC / "cip" / "VERSION.json"
+    if version_json.is_file():
+        try:
+            cip = json.loads(version_json.read_text()).get("cip_version") or cip
+        except (OSError, ValueError):
+            pass
+    sha = os.environ.get("SOURCE_COMMIT", "").strip()
+    if not sha:
+        try:
+            sha = subprocess.run(
+                ["git", "-C", str(OTC), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            # Last dash segment of dated revisions (…-1aa4a8c4 / …-fovodd-1aa4a8c4).
+            sha = fallback.rsplit("-", 1)[-1] if fallback else "0"
+    return f"{cip}.{sha[:6]}"
+
+
 def write_package(directory: Path, version: str, executable: str, files: list[dict], generation: str | None) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     doc: dict = {"version": version, "files": files, "executable": executable}
@@ -189,7 +220,9 @@ def emit_cip(
     (assets_dir / "assets.json.sha256").write_text(sha256_bytes(assets_bytes))
     write_json(assets_dir / "assets-macos.json", assets_doc)
 
-    version = release.get("revision") or "0"
+    # CIP shows 15.33.c9e45e under Play — not a long dated/branch stamp.
+    version = cip_package_version(release.get("revision") or "0")
+    launcher_version = cip_package_version(launcher_version)
     launcher_builds = []
     packages_builds = []
     for os_name, arch, target_name, launcher_dir_name, client_dir_name in PLATFORMS:
@@ -243,8 +276,19 @@ def emit_cip(
             wasm_rel = target.get("wasm")
             wasm_dir = out / wasm_rel if wasm_rel else None
             if wasm_dir and wasm_dir.is_dir():
-                for name in ("tibia.js", "tibia.wasm", "qtloader.js"):
+                # tibia.data is the Emscripten preload sidecar; qtloader fetches
+                # it next to tibia.js when /play boots the game.
+                required_wasm = {"tibia.js", "tibia.wasm"}
+                for name in ("tibia.js", "tibia.wasm", "tibia.data", "qtloader.js"):
                     src = wasm_dir / name
+                    if not src.is_file():
+                        if name in required_wasm:
+                            raise SystemExit(
+                                f"[assemble] missing required {src} — refusing to ship a broken /play package"
+                            )
+                        if name == "tibia.data":
+                            print(f"[assemble] warning: missing {src} — /play will 404 tibia.data")
+                        continue
                     copy_plain(src, client_dir / name)
                     rec = pack_file(out, client_dir, src, name)
                     if rec:
