@@ -108,26 +108,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull previous tree
+      - name: Pull previous tree (metadata only)
         env:
           CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
           CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
           CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
           CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
         run: |
+          # Skip content/ + packs/ (~multi-GB). Those stay on the host volume;
+          # sync-cdn.sh merges new blobs without deleting existing ones.
           mkdir -p slices/previous
           CDN_SSH_USER="${CDN_SSH_USER:-root}"
           if [[ -n "${CDN_SSH_HOST:-}" && -n "${CDN_SSH_KEY:-}" ]]; then
             KEY_FILE="$RUNNER_TEMP/cdn_ssh_key"
             umask 077
             printf '%s\n' "$CDN_SSH_KEY" > "$KEY_FILE"
-            rsync -a -e "ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes" \
+            rsync -a \
+              --exclude content/ --exclude packs/ \
+              -e "ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes" \
               "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/" slices/previous/ \
               || echo "::warning::rsync previous tree failed — assembling without previous"
           else
             echo "::notice::CDN_SSH_* unset — extracting previous from cdn:latest if present"
             bash scripts/extract-image.sh "$REGISTRY/cdn:latest" /usr/share/nginx/html slices/previous || true
+            # Drop fat blobs if we pulled a legacy full image.
+            rm -rf slices/previous/content slices/previous/packs
           fi
+          du -sh slices/previous 2>/dev/null || true
 
       - name: Extract changed slices
         env:
