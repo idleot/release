@@ -24,29 +24,30 @@ and `build_if_missing=false`. Missing `:<sha>` tags fail fast.
 ```
 resolve -> require warm GHCR images (or build_if_missing)
         -> bundle      (assemble site; push thin nginx runtime; artifact site/)
-        -> close-gate  (record live tags; portal stops issuing game sessions)
-        -> deploy CDN volume sync | server | portal | Pages   (in parallel)
-        -> open-gate   (portal confirms latest/release.json is the new revision)
+        -> record-live (Coolify tags for rollback)
+        -> deploy server (when changed) → CDN tip flip → portal | Pages
         -> :latest = live, GitHub Release on the umbrella tag
 ```
 
-When images are already warm, the flip is assemble + rsync + Coolify switches
-(typically minutes, not an hour). Pass `build_if_missing=true` only when you
+When images are already warm, the flip is assemble + rsync + Coolify/compose
+switches (typically minutes). Pass `build_if_missing=true` only when you
 intentionally want the release to compile.
 
-- **Gate** — `scripts/gate.sh` calls the portal `POST /api/release/gate`
-  (Bearer `RELEASE_GATE_TOKEN`). Closing it also deletes every game session
-  key. Opening waits until the portal reads the new `latest/release.json`
-  revision. The gate closes only for server or client releases.
-- **CDN** — thin `ghcr.io/idleot/cdn:runtime-*` (nginx + config). The site tree
-  lives on the Coolify host at `/data/idleot-cdn/html` (source of truth for
-  blobs). Bundle pulls only `latest/` + `releases/` into CI, assembles deltas,
-  uploads immutable blobs with `sync-cdn.sh blobs` (pre-gate,
-  `--ignore-existing`), then after the gate Deploy CDN runs `sync-cdn.sh flip`
-  for `latest/` + `releases/` only. Coolify mounts the volume read-only.
-- **Auto rollback** — restores server/portal Coolify tags and
-  `sync-cdn.sh rollback` for `latest/` on the volume.
-- **Stuck closed:** `SITE_URL=https://www.idleot.com RELEASE_GATE_TOKEN=... bash scripts/gate.sh open`.
+There is **no portal login gate**. Releases match CIP: bounce/restart the game
+world (clients see unreachable / connection-lost), flip
+`https://static.idleot.com` tips, then portal. Package updates stay in the
+launcher (`/launcher/tibiametadata.json`).
+
+- **Promote** — `scripts/deployctl` names apps (`server` / `portal` / `cdn`);
+  Coolify UUIDs stay in GitHub env vars. Set `IDLEOT_DEPLOY_BACKEND=compose-ssh`
+  to target the umbrella Compose stack instead.
+- **CDN** — thin `ghcr.io/idleot/cdn:runtime-*` (nginx + config). Site tree on
+  the host at `/data/idleot-cdn/html`. Bundle uploads immutable blobs with
+  `sync-cdn.sh blobs` (`--ignore-existing`), then Deploy CDN runs
+  `sync-cdn.sh flip` for `latest/` + `releases/`. Public tip:
+  `https://static.idleot.com` (`cdn.idleot.com` is a temporary CNAME).
+- **Auto rollback** — restores server/portal tags and `sync-cdn.sh rollback`
+  for `latest/` on the volume.
 
 - **auto** — a component ships when its submodule pointer changed since the
   previous `v*` tag. Add `[release:all]` to force everything.
@@ -98,11 +99,11 @@ Targets — `IDLEOT_CDN_TARGETS`: `image` (default), `pages`, or `image,pages`.
 | Name | Where | Purpose |
 |------|-------|---------|
 | `RELEASE_TOKEN` | `release` env secret | PAT for private repos / dispatch |
-| `COOLIFY_URL`, `COOLIFY_TOKEN` | `release` env secret | Coolify API |
-| `RELEASE_GATE_TOKEN` | `release` env secret | login gate |
+| `COOLIFY_URL`, `COOLIFY_TOKEN` | `release` env secret | Coolify API (deployctl coolify backend) |
 | `CDN_SSH_HOST`, `CDN_SSH_KEY` | `release` env secret | rsync site tree to `/data/idleot-cdn` |
 | `CDN_SSH_USER` | `release` env secret (optional) | default `root` |
-| `COOLIFY_SERVER_UUID`, `COOLIFY_PORTAL_UUID`, `COOLIFY_CDN_UUID` | `release` env variable | Coolify apps |
+| `COOLIFY_SERVER_UUID`, `COOLIFY_PORTAL_UUID`, `COOLIFY_CDN_UUID` | `release` env variable | Coolify apps (deployctl maps names → UUIDs) |
+| `IDLEOT_CDN_URL` | repo / env variable | default `https://static.idleot.com` |
 | `IDLEOT_CDN_TARGETS` | repo variable | `image` / `pages` / `image,pages` |
 | `CDN_REMOTE_ROOT` | `release` env variable (optional) | default `/data/idleot-cdn` |
 | macOS / Windows signing secrets | `release` env (optional) | as before |
@@ -122,7 +123,8 @@ Desktop and browser share one tip protocol (see
 | Launcher binary | `launcher/launcher-*-current/` | Bootstrap / first run |
 | Client engine | `launcher/tibiaclient-*-current/` + `content/` | Launcher `installPackage` |
 | Things / assets | `launcher/assets-current/` + `content/` (+ `/packs` zips on web) | Launcher `installAssets` / things packs **before Play** |
-| Live tip | `latest/release.json`, `tibiametadata.json` | Gate flip only |
+| Live tip | `latest/release.json`, `tibiametadata.json` | Tip flip only |
+| CIP tips | `/launcher/…`, `/hints.json`, `/images/…` | Same origin as IdleOT `/latest` |
 
 `emit_cip` (during Bundle assemble) writes `tibiametadata.json` for
 `windows` / `macos` / `linux` / `web`. Payloads are lzma-alone, content-addressed
@@ -133,8 +135,7 @@ Release path for binaries:
 
 ```text
 warm GHCR → tag → resolve → assemble+emit_cip
-  → sync-cdn blobs (pre-gate) → close gate
-  → sync-cdn flip latest/releases → open gate
+  → sync-cdn blobs → server bounce (if needed) → sync-cdn flip latest/releases
 ```
 
 - **Desktop:** `tibia-desktop` + installers → `tibiaclient-{windows,macos,linux}-current`

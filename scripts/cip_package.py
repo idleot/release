@@ -335,19 +335,29 @@ def emit_cip(
         hints.write_bytes(vendored_hints.read_bytes())
     elif not hints.is_file():
         write_json(hints, {"hints": ["Welcome to IdleOT."]})
-    news_candidates = (
-        release_root / "vendor" / "launcher-hints" / "images" / "news",
-        Path(__file__).resolve().parents[2] / "otclient" / "data" / "images" / "news",
+    # CIP tip art: copy the whole images/ tree (news, mmorpg, …) when vendored.
+    image_roots = (
+        release_root / "vendor" / "launcher-hints" / "images",
+        Path(__file__).resolve().parents[2] / "otclient" / "data" / "images",
     )
-    news = next((p for p in news_candidates if p.is_dir()), None)
-    if news is not None:
-        dest = out / "images" / "news"
-        dest.mkdir(parents=True, exist_ok=True)
-        for image in news.iterdir():
-            if image.is_file():
-                target = dest / image.name
-                if not target.exists() or target.stat().st_size != image.stat().st_size:
-                    shutil.copy2(image, target)
+    for images_src in image_roots:
+        if not images_src.is_dir():
+            continue
+        for path in images_src.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(images_src)
+            # Skip client UI chrome under data/images — only tip paths (news/mmorpg/…).
+            if images_src.name == "images" and "otclient" in str(images_src) and rel.parts[0] not in (
+                "news",
+                "mmorpg",
+            ):
+                continue
+            target = out / "images" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists() or target.stat().st_size != path.stat().st_size:
+                shutil.copy2(path, target)
+        break
 
     # /download reads latest/desktop.json — ship real launcher archives, not CIP metadata.
     # macOS must be a DMG (or ditto zip) so Qt framework symlinks survive; Python

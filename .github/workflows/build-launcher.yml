@@ -128,7 +128,7 @@ jobs:
       MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
       # Baked into the binary (option_env!); runtime IDLEOT_* env still overrides.
       IDLEOT_PORTAL_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
-      IDLEOT_CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
+      IDLEOT_CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://static.idleot.com' }}
     steps:
       - name: Checkout portal
         uses: actions/checkout@v5

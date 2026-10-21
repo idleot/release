@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Promote adapter for idleot/release workflows. Name apps, not Coolify UUIDs.
+#
+#   deployctl deploy server <IMAGE_TAG>
+#   deployctl deploy portal <tag> [ghcr.io/.../portal]
+#   deployctl deploy cdn <runtime-tag>
+#   deployctl image portal <tag> [name]
+#   deployctl env portal KEY VALUE
+#   deployctl get-image portal
+#   deployctl get-env server IMAGE_TAG
+#
+# UUID mapping (GitHub `release` environment variables):
+#   server  → COOLIFY_SERVER_UUID
+#   portal  → COOLIFY_PORTAL_UUID | COOLIFY_AAC_UUID
+#   cdn     → COOLIFY_CDN_UUID
+#   metrics → COOLIFY_METRICS_UUID
+#
+# Optional IDLEOT_DEPLOY_BACKEND=compose-ssh uses COMPOSE_SSH_* / CDN_SSH_*.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND="${IDLEOT_DEPLOY_BACKEND:-coolify}"
+
+app_uuid() {
+  case "$1" in
+    server)  printf '%s' "${COOLIFY_SERVER_UUID:-}" ;;
+    portal)  printf '%s' "${COOLIFY_PORTAL_UUID:-${COOLIFY_AAC_UUID:-}}" ;;
+    cdn)     printf '%s' "${COOLIFY_CDN_UUID:-}" ;;
+    metrics) printf '%s' "${COOLIFY_METRICS_UUID:-}" ;;
+    *) echo "deployctl: unknown app '$1'" >&2; exit 2 ;;
+  esac
+}
+
+coolify() { bash "$HERE/coolify.sh" "$@"; }
+
+cmd="${1:-}"; shift || true
+[[ -n "$cmd" ]] || { echo "usage: deployctl deploy|image|env|get-image|get-env ..." >&2; exit 2; }
+
+if [[ "$BACKEND" == compose-ssh ]]; then
+  host="${COMPOSE_SSH_HOST:-${CDN_SSH_HOST:?set COMPOSE_SSH_HOST or CDN_SSH_HOST}}"
+  user="${COMPOSE_SSH_USER:-${CDN_SSH_USER:-root}}"
+  remote="${COMPOSE_REMOTE_DIR:-/opt/idleot/stack}"
+  keyfile=""
+  ssh=(ssh -o StrictHostKeyChecking=accept-new)
+  if [[ -n "${COMPOSE_SSH_KEY:-${CDN_SSH_KEY:-}}" ]]; then
+    keyfile="$(mktemp)"
+    printf '%s\n' "${COMPOSE_SSH_KEY:-$CDN_SSH_KEY}" >"$keyfile"
+    chmod 600 "$keyfile"
+    ssh+=(-i "$keyfile")
+    trap 'rm -f "$keyfile"' EXIT
+  fi
+  case "$cmd" in
+    deploy)
+      app="$1"; tag="${2:-}"
+      svc="$app"
+      if [[ -n "$tag" ]]; then
+        "${ssh[@]}" "${user}@${host}" "cd $remote && export IMAGE_TAG=$(printf %q "$tag") && docker compose pull $svc && docker compose up -d $svc"
+      else
+        "${ssh[@]}" "${user}@${host}" "cd $remote && docker compose pull $svc && docker compose up -d $svc"
+      fi
+      ;;
+    *) echo "deployctl compose-ssh: $cmd not supported" >&2; exit 2 ;;
+  esac
+  exit 0
+fi
+
+case "$cmd" in
+  deploy)
+    app="$1"; tag="${2:-}"; name="${3:-}"
+    uuid="$(app_uuid "$app")"
+    [[ -n "$uuid" ]] || { echo "deployctl: set Coolify UUID for $app" >&2; exit 1; }
+    if [[ "$app" == server ]]; then
+      [[ -n "$tag" ]] || { echo "deployctl: deploy server needs IMAGE_TAG" >&2; exit 2; }
+      coolify env "$uuid" IMAGE_TAG "$tag"
+    elif [[ -n "$tag" ]]; then
+      if [[ -n "$name" ]]; then coolify image "$uuid" "$tag" "$name"
+      else coolify image "$uuid" "$tag"; fi
+    fi
+    coolify deploy "$uuid"
+    ;;
+  image)
+    app="$1"; tag="$2"; name="${3:-}"
+    uuid="$(app_uuid "$app")"
+    [[ -n "$uuid" ]] || { echo "deployctl: set Coolify UUID for $app" >&2; exit 1; }
+    if [[ -n "$name" ]]; then coolify image "$uuid" "$tag" "$name"
+    else coolify image "$uuid" "$tag"; fi
+    ;;
+  env)
+    app="$1"; key="$2"; value="$3"
+    uuid="$(app_uuid "$app")"
+    [[ -n "$uuid" ]] || { echo "deployctl: set Coolify UUID for $app" >&2; exit 1; }
+    coolify env "$uuid" "$key" "$value"
+    ;;
+  get-image)
+    uuid="$(app_uuid "$1")"
+    [[ -n "$uuid" ]] || { echo "deployctl: set Coolify UUID for $1" >&2; exit 1; }
+    coolify get-image "$uuid"
+    ;;
+  get-env)
+    uuid="$(app_uuid "$1")"
+    [[ -n "$uuid" ]] || { echo "deployctl: set Coolify UUID for $1" >&2; exit 1; }
+    coolify get-env "$uuid" "$2"
+    ;;
+  *)
+    echo "deployctl: unknown cmd $cmd" >&2; exit 2 ;;
+esac

@@ -414,7 +414,7 @@ jobs:
         env:
           SOURCE_COMMIT: ${{ env.SHA }}
           IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
-          IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://cdn.idleot.com' }}
+          IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
         run: |
           extra=(--engine-files)
           [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--content-files)

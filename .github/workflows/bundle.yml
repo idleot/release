@@ -152,7 +152,7 @@ jobs:
 
       - name: Assemble tree
         env:
-          CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
+          CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://static.idleot.com' }}
         run: |
           prev=()
           [[ -d slices/previous/latest ]] && prev=(--previous slices/previous)

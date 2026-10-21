@@ -231,7 +231,7 @@ def main() -> int:
     ap.add_argument("--desktop")
     ap.add_argument("--assets")
     ap.add_argument("--launcher")
-    ap.add_argument("--cdn-url", default="https://cdn.idleot.com",
+    ap.add_argument("--cdn-url", default="https://static.idleot.com",
                     help="public bundle root (absolute URLs in launcher/latest.json)")
     ap.add_argument("--keep-wasm", type=int, default=3)
     ap.add_argument("--keep-releases", type=int, default=3)

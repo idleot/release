@@ -4,11 +4,11 @@
 #
 #   resolve -> require warm GHCR images (or build_if_missing)
 #           -> bundle site tree + thin CDN runtime (exact slice tags)
-#           -> close the portal login gate (client or server releases)
-#           -> sync CDN volume + deploy server/portal/pages in parallel
-#           -> reopen the gate once the CDN serves the new release revision
-#              (any failure: roll apps back, restore previous latest/, reopen)
+#           -> record live Coolify tags (for rollback)
+#           -> deploy server (when changed), then CDN flip + portal/pages
+#           -> (any failure: roll apps back, restore previous latest/)
 #           -> move :latest to what is live, GitHub Release on the umbrella tag
+#   No portal login gate — CIP-like: restart/unreachable during the flip.
 #
 # components: auto | all | client | server | portal | launcher | server+portal | assets
 # skip_build: redeploy existing images only (rollback)
@@ -183,8 +183,8 @@ jobs:
       release_id: ${{ needs.resolve.outputs.release_id }}
       publish_pages: false
 
-  close-gate:
-    name: Close login gate
+  record-live:
+    name: Record live tags
     needs: [resolve, require-images, build-client, build-launcher, build-server, build-portal, bundle]
     if: >-
       always() && needs.resolve.result == 'success' &&
@@ -194,15 +194,15 @@ jobs:
     timeout-minutes: 10
     environment: release
     outputs:
-      gated: ${{ steps.gate.outputs.gated }}
       server_tag: ${{ steps.live.outputs.server_tag }}
       portal_tag: ${{ steps.live.outputs.portal_tag }}
       cdn_runtime_tag: ${{ steps.live.outputs.cdn_runtime_tag }}
     env:
       COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
       COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
-      RELEASE_GATE_TOKEN: ${{ secrets.RELEASE_GATE_TOKEN }}
+      COOLIFY_SERVER_UUID: ${{ vars.COOLIFY_SERVER_UUID }}
+      COOLIFY_PORTAL_UUID: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
+      COOLIFY_CDN_UUID: ${{ vars.COOLIFY_CDN_UUID }}
     steps:
       - uses: actions/checkout@v5
 
@@ -212,45 +212,28 @@ jobs:
           SERVER: ${{ needs.resolve.outputs.server }}
           PORTAL: ${{ needs.resolve.outputs.portal }}
           CDN: ${{ needs.bundle.result == 'success' && contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image') }}
-          SERVER_APP: ${{ vars.COOLIFY_SERVER_UUID }}
-          PORTAL_APP: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
-          CDN_APP: ${{ vars.COOLIFY_CDN_UUID }}
         run: |
-          if [[ "$SERVER" == true && -n "$SERVER_APP" ]]; then
-            tag="$(bash scripts/coolify.sh get-env "$SERVER_APP" IMAGE_TAG)"
+          if [[ "$SERVER" == true ]]; then
+            tag="$(bash scripts/deployctl get-env server IMAGE_TAG || true)"
             echo "server_tag=${tag}" >> "$GITHUB_OUTPUT"; echo "server: ${tag:-<unset>}"
           fi
-          if [[ "$PORTAL" == true && -n "$PORTAL_APP" ]]; then
-            tag="$(bash scripts/coolify.sh get-image "$PORTAL_APP")"
+          if [[ "$PORTAL" == true ]]; then
+            tag="$(bash scripts/deployctl get-image portal || true)"
             echo "portal_tag=${tag}" >> "$GITHUB_OUTPUT"; echo "portal: ${tag:-<unset>}"
           fi
-          if [[ "$CDN" == true && -n "$CDN_APP" ]]; then
-            tag="$(bash scripts/coolify.sh get-image "$CDN_APP")"
+          if [[ "$CDN" == true ]]; then
+            tag="$(bash scripts/deployctl get-image cdn || true)"
             echo "cdn_runtime_tag=${tag}" >> "$GITHUB_OUTPUT"; echo "cdn runtime: ${tag:-<unset>}"
           fi
 
-      - name: Close
-        id: gate
-        if: needs.resolve.outputs.server == 'true' || needs.resolve.outputs.client == 'true'
-        run: |
-          if [[ -z "$RELEASE_GATE_TOKEN" ]]; then
-            echo "::warning::RELEASE_GATE_TOKEN is not set — switching without the login gate"
-            echo "gated=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          rc=0
-          bash scripts/gate.sh close || rc=$?
-          case "$rc" in
-            0) echo "gated=true" >> "$GITHUB_OUTPUT" ;;
-            3) echo "gated=false" >> "$GITHUB_OUTPUT" ;;
-            *) exit "$rc" ;;
-          esac
-
-  # CDN volume sync is fast (rsync deltas). Run in parallel with server/portal.
+  # Tip flip after server bounce when the world image changes (CIP-like downtime).
   deploy-cdn:
     name: Deploy CDN
-    needs: [resolve, bundle, close-gate]
+    # Prefer server bounce before tip flip when the world image changes (CIP-like).
+    needs: [resolve, bundle, record-live, deploy-server]
     if: >-
-      always() && needs.bundle.result == 'success' && needs.close-gate.result == 'success' &&
+      always() && needs.bundle.result == 'success' && needs.record-live.result == 'success' &&
+      (needs.deploy-server.result == 'success' || needs.deploy-server.result == 'skipped') &&
       contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image')
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -260,10 +243,10 @@ jobs:
       COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
       COOLIFY_DEPLOY_TIMEOUT: "600"
       COOLIFY_DEPLOY_RETRIES: "2"
-      APP: ${{ vars.COOLIFY_CDN_UUID }}
+      COOLIFY_CDN_UUID: ${{ vars.COOLIFY_CDN_UUID }}
       RUNTIME_TAG: ${{ needs.bundle.outputs.runtime_tag }}
       BUNDLE_TAG: ${{ needs.bundle.outputs.tag }}
-      CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
+      CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://static.idleot.com' }}
       CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
       CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
       CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
@@ -280,27 +263,26 @@ jobs:
           # Redeploy BEFORE flip. Coolify dockerimage deploys have dropped the
           # host volume mount before; we verify the mount before flipping tip.
           export CDN_SSH_USER="${CDN_SSH_USER:-root}"
-          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
+          [[ -n "${COOLIFY_CDN_UUID:-}" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
           [[ -n "$CDN_SSH_HOST" && -n "$CDN_SSH_KEY" ]] || {
             echo "::error::set CDN_SSH_HOST and CDN_SSH_KEY secrets for volume sync"
             exit 1
           }
-          live="$(bash scripts/coolify.sh get-image "$APP" || true)"
+          live="$(bash scripts/deployctl get-image cdn || true)"
           if [[ "$live" == "$RUNTIME_TAG" || "$live" == "runtime" ]]; then
             echo "[coolify] runtime already ${live} — skip image deploy"
           else
-            bash scripts/coolify.sh image "$APP" "$RUNTIME_TAG"
-            bash scripts/coolify.sh deploy "$APP"
+            bash scripts/deployctl deploy cdn "$RUNTIME_TAG"
           fi
           if ! bash scripts/sync-cdn.sh verify-mount; then
             echo "::warning::volume mount missing after deploy — restarting once"
-            bash scripts/coolify.sh deploy "$APP" || true
+            bash scripts/deployctl deploy cdn || true
             sleep 10
             bash scripts/sync-cdn.sh verify-mount
           fi
       - name: Flip latest/ on host volume
         run: |
-          # Blobs were uploaded in Bundle (pre-gate). This only replaces manifests.
+          # Blobs were uploaded in Bundle. This only replaces manifests.
           export CDN_SSH_USER="${CDN_SSH_USER:-root}"
           bash scripts/sync-cdn.sh flip site
           bash scripts/sync-cdn.sh verify
@@ -321,15 +303,15 @@ jobs:
 
   deploy-server:
     name: Deploy server
-    needs: [resolve, close-gate]
-    if: always() && needs.resolve.outputs.server == 'true' && needs.close-gate.result == 'success'
+    needs: [resolve, record-live]
+    if: always() && needs.resolve.outputs.server == 'true' && needs.record-live.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
     env:
       COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
       COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      APP: ${{ vars.COOLIFY_SERVER_UUID }}
+      COOLIFY_SERVER_UUID: ${{ vars.COOLIFY_SERVER_UUID }}
       SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
       GAME_HOST: ${{ vars.IDLEOT_GAME_HOST || 'idleot.com' }}
     steps:
@@ -344,9 +326,8 @@ jobs:
         run: docker buildx imagetools inspect "$REGISTRY/crystalserver:$SHA" >/dev/null
       - name: Point idleot-server at crystalserver:${{ env.SHA }}
         run: |
-          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_SERVER_UUID"; exit 1; }
-          bash scripts/coolify.sh env "$APP" IMAGE_TAG "$SHA"
-          bash scripts/coolify.sh deploy "$APP"
+          [[ -n "${COOLIFY_SERVER_UUID:-}" ]] || { echo "::error::set environment variable COOLIFY_SERVER_UUID"; exit 1; }
+          bash scripts/deployctl deploy server "$SHA"
       - name: Wait for the game server
         run: |
           for _ in $(seq 1 30); do
@@ -359,28 +340,25 @@ jobs:
 
   deploy-portal:
     name: Deploy portal
-    needs: [resolve, close-gate]
-    if: always() && needs.resolve.outputs.portal == 'true' && needs.close-gate.result == 'success'
+    needs: [resolve, record-live, deploy-cdn]
+    if: >-
+      always() && needs.resolve.outputs.portal == 'true' && needs.record-live.result == 'success' &&
+      (needs.deploy-cdn.result == 'success' || needs.deploy-cdn.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
     env:
       COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
       COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      APP: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
+      COOLIFY_PORTAL_UUID: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
       SHA: ${{ needs.resolve.outputs.portal_sha }}
       SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
-      RELEASE_GATE_TOKEN: ${{ secrets.RELEASE_GATE_TOKEN }}
     steps:
       - uses: actions/checkout@v5
       - name: Point the portal app at portal:${{ env.SHA }}
         run: |
-          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_PORTAL_UUID"; exit 1; }
-          if [[ -n "$RELEASE_GATE_TOKEN" ]]; then
-            bash scripts/coolify.sh env "$APP" RELEASE_GATE_TOKEN "$RELEASE_GATE_TOKEN"
-          fi
-          bash scripts/coolify.sh image "$APP" "$SHA" "$REGISTRY/portal"
-          bash scripts/coolify.sh deploy "$APP"
+          [[ -n "${COOLIFY_PORTAL_UUID:-}" ]] || { echo "::error::set environment variable COOLIFY_PORTAL_UUID"; exit 1; }
+          bash scripts/deployctl deploy portal "$SHA" "$REGISTRY/portal"
       - name: Wait for the site
         run: |
           for _ in $(seq 1 30); do
@@ -391,9 +369,9 @@ jobs:
 
   deploy-pages:
     name: Deploy GitHub Pages
-    needs: [bundle, close-gate]
+    needs: [bundle, record-live]
     if: >-
-      always() && needs.bundle.result == 'success' && needs.close-gate.result == 'success' &&
+      always() && needs.bundle.result == 'success' && needs.record-live.result == 'success' &&
       contains(vars.IDLEOT_CDN_TARGETS || 'image', 'pages')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -407,30 +385,12 @@ jobs:
         id: deploy
         uses: actions/deploy-pages@v4
 
-  open-gate:
-    name: Open login gate
-    needs: [resolve, bundle, close-gate, deploy-server, deploy-portal, deploy-cdn, deploy-pages]
-    if: >-
-      always() && needs.close-gate.result == 'success' &&
-      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: release
-    steps:
-      - uses: actions/checkout@v5
-      - name: Open
-        if: needs.close-gate.outputs.gated == 'true'
-        env:
-          SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
-          RELEASE_GATE_TOKEN: ${{ secrets.RELEASE_GATE_TOKEN }}
-          EXPECT: ${{ needs.bundle.outputs.revision }}
-        run: bash scripts/gate.sh open "$EXPECT"
 
   rollback:
     name: Roll back
-    needs: [resolve, close-gate, deploy-server, deploy-portal, deploy-cdn, deploy-pages, open-gate]
+    needs: [resolve, record-live, deploy-server, deploy-portal, deploy-cdn, deploy-pages]
     if: >-
-      always() && needs.close-gate.result == 'success' &&
+      always() && needs.record-live.result == 'success' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -438,6 +398,9 @@ jobs:
     env:
       COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
       COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+      COOLIFY_SERVER_UUID: ${{ vars.COOLIFY_SERVER_UUID }}
+      COOLIFY_PORTAL_UUID: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
+      COOLIFY_CDN_UUID: ${{ vars.COOLIFY_CDN_UUID }}
       CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
       CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
       CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
@@ -445,21 +408,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Restore server
-        if: always() && needs.deploy-server.result != 'skipped' && needs.close-gate.outputs.server_tag != ''
+        if: always() && needs.deploy-server.result != 'skipped' && needs.record-live.outputs.server_tag != ''
         env:
-          APP: ${{ vars.COOLIFY_SERVER_UUID }}
-          TAG: ${{ needs.close-gate.outputs.server_tag }}
-        run: |
-          bash scripts/coolify.sh env "$APP" IMAGE_TAG "$TAG"
-          bash scripts/coolify.sh deploy "$APP"
+          TAG: ${{ needs.record-live.outputs.server_tag }}
+        run: bash scripts/deployctl deploy server "$TAG"
       - name: Restore portal
-        if: always() && needs.deploy-portal.result != 'skipped' && needs.close-gate.outputs.portal_tag != ''
+        if: always() && needs.deploy-portal.result != 'skipped' && needs.record-live.outputs.portal_tag != ''
         env:
-          APP: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
-          TAG: ${{ needs.close-gate.outputs.portal_tag }}
-        run: |
-          bash scripts/coolify.sh image "$APP" "$TAG"
-          bash scripts/coolify.sh deploy "$APP"
+          TAG: ${{ needs.record-live.outputs.portal_tag }}
+        run: bash scripts/deployctl deploy portal "$TAG"
       - name: Restore CDN latest/ on volume
         if: always() && needs.deploy-cdn.result != 'skipped'
         run: |
@@ -467,30 +424,26 @@ jobs:
           if [[ -n "${CDN_SSH_HOST:-}" && -n "${CDN_SSH_KEY:-}" ]]; then
             bash scripts/sync-cdn.sh rollback || echo "::warning::CDN volume rollback failed"
           fi
-          APP="${{ vars.COOLIFY_CDN_UUID }}"
-          TAG="${{ needs.close-gate.outputs.cdn_runtime_tag }}"
-          if [[ -n "$APP" && -n "$TAG" ]]; then
-            bash scripts/coolify.sh image "$APP" "$TAG"
-            bash scripts/coolify.sh deploy "$APP" || true
+          TAG="${{ needs.record-live.outputs.cdn_runtime_tag }}"
+          if [[ -n "${COOLIFY_CDN_UUID:-}" && -n "$TAG" ]]; then
+            bash scripts/deployctl deploy cdn "$TAG" || true
           fi
       - name: Pages
         if: always() && needs.deploy-pages.result == 'success'
         run: echo "::warning::GitHub Pages already serves the new bundle; rerun bundle.yml with the previous slice tags to revert it"
-      - name: Reopen the gate
-        if: always() && needs.close-gate.outputs.gated == 'true'
-        env:
-          SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
-          RELEASE_GATE_TOKEN: ${{ secrets.RELEASE_GATE_TOKEN }}
-        run: bash scripts/gate.sh open
       - name: Fail the release
         if: always()
         run: echo "::error::the switch failed and was rolled back"; exit 1
 
   finalize:
     name: Finalize
-    needs: [resolve, build-client, build-launcher, bundle, close-gate, deploy-server, deploy-portal, deploy-cdn, deploy-pages, open-gate]
+    needs: [resolve, build-client, build-launcher, bundle, record-live, deploy-server, deploy-portal, deploy-cdn, deploy-pages]
     if: >-
-      always() && needs.resolve.result == 'success' && needs.open-gate.result == 'success' &&
+      always() && needs.resolve.result == 'success' && needs.record-live.result == 'success' &&
+      (needs.deploy-server.result == 'success' || needs.deploy-server.result == 'skipped') &&
+      (needs.deploy-portal.result == 'success' || needs.deploy-portal.result == 'skipped') &&
+      (needs.deploy-cdn.result == 'success' || needs.deploy-cdn.result == 'skipped') &&
+      (needs.deploy-pages.result == 'success' || needs.deploy-pages.result == 'skipped') &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 10
