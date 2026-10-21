@@ -1,0 +1,29 @@
+---
+# Push otclient-wasm:<sha> and tibia-desktop:<sha> before tagging a release.
+# Dispatch from otclient CI on push, or manually:
+#   gh workflow run warm-client.yml -R idleot/release -f otclient_sha=<full-sha>
+name: Warm client
+
+run-name: Warm client ${{ inputs.otclient_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      otclient_sha:
+        description: idleot/otclient commit SHA (full 40 chars)
+        required: true
+  repository_dispatch:
+    types: [warm-client]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build client slices
+    uses: ./.github/workflows/build-client.yml
+    secrets: inherit
+    with:
+      otclient_sha: ${{ inputs.otclient_sha || github.event.client_payload.otclient_sha }}
+      release_id: warm-${{ github.run_id }}

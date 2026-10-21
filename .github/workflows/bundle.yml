@@ -1,19 +1,14 @@
 ---
-# Assemble the CDN bundle from exact slice tags and push ghcr.io/idleot/cdn:<tag>.
-# release.yml calls this right after the builds, before anything goes live; it
-# does not deploy and does not move :latest — release.yml switches the CDN
-# together with the server and portal, then moves :latest. `:latest` therefore
-# always means "live".
+# Assemble the CDN site tree from exact slice tags, push a thin nginx runtime
+# image when config changes, and leave the tree for release.yml to rsync onto
+# the Coolify host volume. Does not flip live CDN or move :latest.
 #
-# The previous tree is the live bundle (cdn:latest), so older WASM/desktop
-# revisions stay reachable for clients that have not reloaded yet.
+# Previous tree is pulled from the live host volume when CDN_SSH_* is set;
+# otherwise falls back to extracting ghcr.io/idleot/cdn:latest (legacy fat image).
 #
 # Targets — repository variable IDLEOT_CDN_TARGETS (default "image"):
-#   image  Coolify idleot-cdn runs ghcr.io/idleot/cdn:<tag> (cdn.idleot.com)
-#   pages  GitHub Pages for this repo, same tree byte for byte (publishes on run)
-#
-# Slice packages are private; this repo has Actions access in each package's
-# settings, so GITHUB_TOKEN reads and pushes them.
+#   image  Coolify idleot-cdn (thin runtime + /data/idleot-cdn/html volume)
+#   pages  GitHub Pages for this repo (same tree)
 name: CDN bundle
 
 run-name: CDN bundle ${{ inputs.release_id }}
@@ -48,6 +43,8 @@ on:
       revision:
         description: latest/release.json revision of the bundle
         value: ${{ jobs.bundle.outputs.revision }}
+      runtime_tag:
+        value: ${{ jobs.bundle.outputs.runtime_tag }}
   workflow_dispatch:
     inputs:
       wasm_tag:
@@ -79,7 +76,6 @@ permissions:
   pages: write
   id-token: write
 
-# Bundles stack on the previous image; never run two at once, never cancel one.
 concurrency:
   group: cdn-bundle
   cancel-in-progress: false
@@ -92,10 +88,12 @@ jobs:
   bundle:
     name: Assemble and push
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    environment: release
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       revision: ${{ steps.revision.outputs.revision }}
+      runtime_tag: ${{ steps.runtime.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -110,7 +108,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract slices
+      - name: Pull previous tree
+        env:
+          CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+          CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+          CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
+          CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
+        run: |
+          mkdir -p slices/previous
+          CDN_SSH_USER="${CDN_SSH_USER:-root}"
+          if [[ -n "${CDN_SSH_HOST:-}" && -n "${CDN_SSH_KEY:-}" ]]; then
+            KEY_FILE="$RUNNER_TEMP/cdn_ssh_key"
+            umask 077
+            printf '%s\n' "$CDN_SSH_KEY" > "$KEY_FILE"
+            rsync -a -e "ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes" \
+              "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/" slices/previous/ \
+              || echo "::warning::rsync previous tree failed — assembling without previous"
+          else
+            echo "::notice::CDN_SSH_* unset — extracting previous from cdn:latest if present"
+            bash scripts/extract-image.sh "$REGISTRY/cdn:latest" /usr/share/nginx/html slices/previous || true
+          fi
+
+      - name: Extract changed slices
         env:
           WASM_TAG: ${{ inputs.wasm_tag }}
           DESKTOP_TAG: ${{ inputs.desktop_tag }}
@@ -118,7 +137,7 @@ jobs:
           ASSETS_TAG: ${{ inputs.assets_tag }}
           LAUNCHER_TAG: ${{ inputs.launcher_tag }}
         run: |
-          bash scripts/extract-image.sh "$REGISTRY/cdn:latest" /usr/share/nginx/html slices/previous
+          # Only pull slices we need; empty dirs are fine for assemble.
           bash scripts/extract-image.sh "$REGISTRY/otclient-wasm:${WASM_TAG}" / slices/wasm
           bash scripts/extract-image.sh "$REGISTRY/${DESKTOP_IMAGE}:${DESKTOP_TAG}" / slices/desktop
           bash scripts/extract-image.sh "$REGISTRY/cdn-assets:${ASSETS_TAG}" / slices/assets
@@ -128,9 +147,12 @@ jobs:
         env:
           CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
         run: |
+          prev=()
+          [[ -d slices/previous/latest ]] && prev=(--previous slices/previous)
           python3 scripts/assemble.py --out site --cdn-url "$CDN_URL" \
-            --previous slices/previous --wasm slices/wasm \
-            --desktop slices/desktop --assets slices/assets --launcher slices/launcher
+            "${prev[@]}" --wasm slices/wasm \
+            --desktop slices/desktop --assets slices/assets --launcher slices/launcher \
+            --keep-wasm 2 --keep-releases 2 --keep-launcher 2
           size_mb=$(( $(du -sk site | cut -f1) / 1024 ))
           echo "Bundle size: ${size_mb} MB" >> "$GITHUB_STEP_SUMMARY"
           if [ "$size_mb" -gt 950 ] && [[ "$TARGETS" == *pages* ]]; then
@@ -148,17 +170,35 @@ jobs:
         id: meta
         run: echo "tag=$(date -u +%Y%m%d)-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
+      - name: Runtime image tag
+        id: runtime
+        run: |
+          # Content-address nginx config + Dockerfile so Coolify only redeploys when they change.
+          hash="$(cat Dockerfile nginx.conf | sha256sum | cut -c1-12)"
+          echo "tag=runtime-${hash}" >> "$GITHUB_OUTPUT"
+          echo "runtime_tag=runtime-${hash}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push bundle image
+      - name: Push thin runtime image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           provenance: false
           sbom: false
-          tags: ${{ env.REGISTRY }}/cdn:${{ steps.meta.outputs.tag }}
+          tags: |
+            ${{ env.REGISTRY }}/cdn:${{ steps.runtime.outputs.tag }}
+            ${{ env.REGISTRY }}/cdn:runtime
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-site-${{ steps.meta.outputs.tag }}
+          path: site
+          include-hidden-files: true
+          retention-days: 2
 
       - name: Upload Pages artifact
         if: contains(env.TARGETS, 'pages')
@@ -166,16 +206,14 @@ jobs:
         with:
           path: site
 
-      # Each bundle is a full copy of the tree; keep enough for rollback.
-      - name: Prune old bundle versions
+      - name: Prune old runtime tags
         uses: actions/delete-package-versions@v5
         continue-on-error: true
         with:
           package-name: cdn
           package-type: container
-          min-versions-to-keep: 10
+          min-versions-to-keep: 15
 
-  # release.yml deploys Pages itself, together with the server and portal.
   pages:
     name: Deploy GitHub Pages
     needs: [bundle]

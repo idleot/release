@@ -1,148 +1,119 @@
 # idleot/release
 
-Public release orchestrator for IdleOT, plus the CDN bundle. It is public so
-the client builds (macOS / Windows included) and the time spent waiting on
-other builds cost no Actions minutes. Engine source stays in private repos.
+Public release orchestrator for IdleOT, plus the CDN site tree sync. It is
+public so client builds (macOS / Windows included) and waiting on other builds
+cost no Actions minutes. Engine source stays in private repos.
 
 ## Cutting a release
 
-Tag the umbrella repo (private `idleot/idleot`). Its submodule pointers pin
-every engine:
+**Warm images first**, then tag. The release path does not compile by default.
 
 ```bash
+# After pushing otclient / crystalserver / portal SHAs that will be tagged:
+gh workflow run warm-client.yml -R idleot/release -f otclient_sha=<full-otclient-sha>
+# crystalserver: build-image runs on push to main (or workflow_dispatch)
+# portal: dispatch build-image.yml in idleot/portal
+
 git tag -a v1.4.0 -m "notes [release:all]"   # [release:all] optional
 git push origin v1.4.0
 ```
 
-`idleot/idleot` `tag-release.yml` dispatches **Release** here with `ref=v1.4.0`.
+`idleot/idleot` `tag-release.yml` dispatches **Release** here with `ref=v1.4.0`
+and `build_if_missing=false`. Missing `:<sha>` tags fail fast.
 
 ```
-resolve -> build client, launcher (here) | build server, portal (dispatched to private repos)
-        -> bundle      (bundle.yml with the exact slice tags; pushed, not live)
+resolve -> require warm GHCR images (or build_if_missing)
+        -> bundle      (assemble site; push thin nginx runtime; artifact site/)
         -> close-gate  (record live tags; portal stops issuing game sessions)
-        -> deploy server | portal | CDN | Pages   (in parallel)
+        -> deploy CDN volume sync | server | portal | Pages   (in parallel)
         -> open-gate   (portal confirms latest/release.json is the new revision)
         -> :latest = live, GitHub Release on the umbrella tag
 ```
 
-Nothing goes live until every selected build and the bundle exist, so the flip
-is only the deploy window (~1-3 min).
+When images are already warm, the flip is assemble + rsync + Coolify switches
+(typically minutes, not an hour). Pass `build_if_missing=true` only when you
+intentionally want the release to compile.
 
 - **Gate** — `scripts/gate.sh` calls the portal `POST /api/release/gate`
   (Bearer `RELEASE_GATE_TOKEN`). Closing it also deletes every game session
-  key, so clients already past the character list cannot enter the new
-  server; logins answer "IdleOT is updating" (God accounts bypass) and the
-  SSO client retries on its own. Opening waits until the portal reads the new
-  `latest/release.json` revision. The gate is closed only when the server or
-  client ships; portal/launcher-only releases deploy without it. Without the
-  secret (or on a portal that predates the endpoint) releases deploy ungated
-  with a warning.
-- **Outdated clients** — the portal accepts logins only from the live
-  `latest/release.json` revision (the launcher passes it as
-  `IDLEOT_CLIENT_REVISION`; `/play` too). Players online during a client-only
-  release stay connected and are offered the restart at their next login. The
-  client never polls for updates.
-- **Auto rollback** — when any deploy or the gate reopen fails, `rollback`
-  points server, portal and CDN back at the tags `close-gate` recorded,
-  reopens the gate and fails the run. GitHub Pages is not rolled back
-  (re-run **Bundle** for the previous release if Pages is a target).
-- **Stuck closed** (run cancelled mid-rollback): reopen by hand with
-  `SITE_URL=https://www.idleot.com RELEASE_GATE_TOKEN=... bash scripts/gate.sh open`.
+  key. Opening waits until the portal reads the new `latest/release.json`
+  revision. The gate closes only for server or client releases.
+- **CDN** — thin `ghcr.io/idleot/cdn:runtime-*` (nginx + config). The site tree
+  lives on the Coolify host at `/data/idleot-cdn/html` and is updated with
+  `scripts/sync-cdn.sh` (rsync). Coolify mounts that path read-only.
+- **Auto rollback** — restores server/portal Coolify tags and
+  `sync-cdn.sh rollback` for `latest/` on the volume.
+- **Stuck closed:** `SITE_URL=https://www.idleot.com RELEASE_GATE_TOKEN=... bash scripts/gate.sh open`.
 
 - **auto** — a component ships when its submodule pointer changed since the
-  previous `v*` tag (`apps/otclient` → client, `apps/crystalserver` → server,
-  `apps/portal` → portal). Bump a pointer to include a component; add
-  `[release:all]` to the tag annotation to force everything. The launcher
-  ships when the pinned portal's `apps/launcher/package.json` `version` changed
-  (bump it to publish a launcher; `launcher:<version>` is never rebuilt).
-- **Manual** — run **Release** with `components` = `all | client | server |
-  portal | launcher | server+portal | assets`. `assets` re-bundles the live client with the
-  newest `cdn-assets` (after `publish-assets --push`).
-- **Rollback** — run **Release** with an older tag and `skip_build`. Images are
-  immutable `:<sha>` tags (last 10 kept), so nothing rebuilds.
-- Builds are skipped when the `:<sha>` image already exists.
+  previous `v*` tag. Add `[release:all]` to force everything.
+- **Manual** — `components` = `all | client | server | portal | launcher |
+  server+portal | assets`.
+- **Rollback** — older tag + `skip_build`.
+- **Warm client** — `warm-client.yml` (or release with `build_if_missing`).
 
 ## Privacy
 
 This repo is public; the engines are not.
 
 - Product client is **tibia** (compiled QML + gamecore). Desktop slice is
-  `tibia-desktop`; WASM slice is tibia artifacts (`tibia.js` / `tibia.wasm`)
-  published under the kept image name `ghcr.io/idleot/otclient-wasm`. There is
-  no Lua/OTUI encrypt path.
-- Compiler output is written to files; logs show only an error summary
-  (`-w`, no carets). Cross-repo builds report only their conclusion.
-- No layer or compiler caches of product code; only the pinned Qt SDK and emsdk.
-- Artifacts are the desktop content store the CDN serves (1-day retention).
-  Slice and bundle images are private GHCR packages.
-- No `pull_request` workflows; outside contributors need approval; the default
-  token is read-only; secrets live in the `release` environment (main only).
+  `tibia-desktop`; WASM slice is tibia artifacts under `otclient-wasm`.
+- Compiler output goes to files; logs show only an error summary.
+- Opaque caches only: pinned Qt SDK/emsdk and **ccache** object stores (no
+  source trees in cache artifacts).
+- Site artifacts retain 2 days; slice images are private GHCR packages.
+- No `pull_request` workflows; secrets live in the `release` environment.
 
 ## CDN bundle layout
 
 All URLs inside manifests are relative to the bundle root.
 
 ```
-latest/client-version.json   {revision, productSha, assetsRevision} (portal login needUpdate check)
-latest/desktop.json          schema 2, kind "launcher": per-platform launcher installer url/file/format/size/sha256
-latest/update.json           fixed {engine: "launcher"}: pre-launcher installs offer a reinstall from /download
-latest/sources.json          producer pointers + revision history (pruning)
-latest/release.json          schema 3: targets.{web,desktop}.{content,things} / targets.<platform>.files, web.wasm
-releases/<rev>/*.json        v3 file lists {revision, engine, entry?, files{path: {sha256, size, exec?}}, packs?}
-releases/things-<rev>/content-things.json   sprites (data/things/<version>), merged into web/desktop by client-sync
-content/<aa>/<sha256>        content-addressed blobs (immutable; pruned with releases/)
-packs/<aa>/<sha256>.zip      ~16 MB zips of list blobs (one round trip for cold installs)
-client/<rev>/wasm/tibia.{js,wasm}[.gz|.br] + qtloader   last 3 revisions (image: otclient-wasm)
-launcher/latest.json         Tauri updater manifest (absolute URLs, minisign signatures)
-launcher/<version>/IdleOT-Setup.exe | IdleOT.dmg | IdleOT.app.tar.gz | IdleOT-x86_64.AppImage (+ .sig)   last 2 versions
-assets/store/...             store icons (Crystal coinImagesURL; committed in portal apps/web)
-assets/outfits/manifest.json + <rev>/<looktype>/...   portal outfit frames (rendered by make extract)
-assets/items/manifest.json + <rev>/<id>.png           portal item sprites (rendered by make extract)
+latest/client-version.json   {revision, productSha, assetsRevision}
+latest/desktop.json          launcher installers
+latest/release.json          schema 3 targets
+releases/<rev>/*.json        v3 file lists
+content/<aa>/<sha256>        content-addressed blobs
+packs/<aa>/<sha256>.zip      zip packs
+client/<rev>/wasm/...        WASM (kept revisions)
+launcher/...                 launcher installers
+assets/...                   store / outfits / items
 healthz
 ```
 
 | Slice | Image | Built by |
 |-------|-------|----------|
-| WASM | `ghcr.io/idleot/otclient-wasm:<otclient sha>` | `build-client.yml` |
-| v3 engine/content lists, blobs and packs | `ghcr.io/idleot/tibia-desktop:<otclient sha>` | `build-client.yml` |
-| Launcher installers + signed update artifacts | `ghcr.io/idleot/launcher:<version>` | `build-launcher.yml` (Tauri, from `idleot/portal` `apps/launcher`) |
-| Things (content-things list) + store + outfits + items | `ghcr.io/idleot/cdn-assets` | local `make -C apps/otclient publish-assets ARGS=--push` (CIP files never touch CI) |
+| WASM | `ghcr.io/idleot/otclient-wasm:<otclient sha>` | `build-client.yml` / `warm-client.yml` |
+| Desktop store | `ghcr.io/idleot/tibia-desktop:<otclient sha>` | same |
+| Thin CDN runtime | `ghcr.io/idleot/cdn:runtime-<hash>` | `bundle.yml` (nginx config only) |
+| Assets | `ghcr.io/idleot/cdn-assets` | `publish-assets --push` |
 
-Targets — repository variable `IDLEOT_CDN_TARGETS`: `image` (default), `pages`,
-or `image,pages`. **image**: Coolify `idleot-cdn` runs `ghcr.io/idleot/cdn:<tag>`.
-**pages**: the same tree on GitHub Pages (1 GB cap, no custom headers, makes the
-things blobs public; WASM still loads through the portal same-origin `/cdn` proxy).
+Targets — `IDLEOT_CDN_TARGETS`: `image` (default), `pages`, or `image,pages`.
 
 ## Setup
 
 | Name | Where | Purpose |
 |------|-------|---------|
-| `RELEASE_TOKEN` | `release` env secret | fine-grained PAT: Contents read on `otclient` + `idleot` + `portal` (launcher source), Actions read/write on `crystalserver` + `portal` |
-| `TAURI_SIGNING_PRIVATE_KEY` (+ optional `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) | `release` env secret | signs launcher updates; the public key is `apps/launcher/src-tauri/tauri.conf.json` `plugins.updater.pubkey` |
+| `RELEASE_TOKEN` | `release` env secret | PAT for private repos / dispatch |
 | `COOLIFY_URL`, `COOLIFY_TOKEN` | `release` env secret | Coolify API |
-| `RELEASE_GATE_TOKEN` | `release` env secret | login gate during the flip (`openssl rand -hex 32`); `deploy-portal` copies it into the portal's Coolify env, so a rotated token takes effect with the next portal release (until then `close-gate` fails before anything deploys) |
-| `COOLIFY_SERVER_UUID`, `COOLIFY_PORTAL_UUID` (falls back to `COOLIFY_AAC_UUID`), `COOLIFY_CDN_UUID` | `release` env variable | Coolify apps |
+| `RELEASE_GATE_TOKEN` | `release` env secret | login gate |
+| `CDN_SSH_HOST`, `CDN_SSH_KEY` | `release` env secret | rsync site tree to `/data/idleot-cdn` |
+| `CDN_SSH_USER` | `release` env secret (optional) | default `root` |
+| `COOLIFY_SERVER_UUID`, `COOLIFY_PORTAL_UUID`, `COOLIFY_CDN_UUID` | `release` env variable | Coolify apps |
 | `IDLEOT_CDN_TARGETS` | repo variable | `image` / `pages` / `image,pages` |
-| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` + vars `TRUSTED_SIGNING_ENDPOINT`, `TRUSTED_SIGNING_ACCOUNT`, `TRUSTED_SIGNING_PROFILE` | `release` env (optional) | Windows signing (Azure Trusted Signing) of the client and launcher; unsigned when absent |
-| `MACOS_CERTIFICATE_P12` (base64), `MACOS_CERTIFICATE_PASSWORD`, `MACOS_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | `release` env secret (optional) | macOS Developer ID signing + notarization of the client and launcher; ad-hoc when absent |
-| `IDLEOT_SITE_URL`, `IDLEOT_CDN_URL` | `release` env variable (optional) | portal / CDN origins baked into the launcher and `launcher/latest.json` (default production) |
+| `CDN_REMOTE_ROOT` | `release` env variable (optional) | default `/data/idleot-cdn` |
+| macOS / Windows signing secrets | `release` env (optional) | as before |
+
+Host one-time: `deploy/coolify-host-setup.sh` seeds `/data/idleot-cdn/html` and
+documents Coolify `custom_docker_run_options`:
+`-v /data/idleot-cdn/html:/usr/share/nginx/html:ro`. Set Coolify
+**concurrent builds ≥ 3** so server/portal/CDN can flip together.
 
 ## Desktop launcher
 
-The IdleOT launcher (`build-launcher.yml`) is the only desktop installer:
-Windows NSIS (per-user), macOS DMG, Linux AppImage, listed by `/download`
-from `latest/desktop.json`. It updates itself from `launcher/latest.json` and
-installs/updates the game (engine + `content-desktop` + `content-things`) from
-`latest/release.json`, the same lists the browser `/play` syncs. Release game
-builds (`release_env.lua` `IDLEOT_REVISION`) refuse to start outside the
-launcher and send players to `/download`. Installs from before the launcher
-read the fixed `latest/update.json`, whose foreign engine makes them offer the
-same reinstall.
+The Qt launcher ships with the client/CDN bundle. Installers are listed by
+`/download` from `latest/desktop.json`.
 
-Every private package (`otclient-wasm`, `tibia-desktop`, `launcher`, `cdn`,
-`cdn-assets`, `crystalserver`) grants this repo **Actions access:
-Admin** under *Package settings → Manage Actions access*, so `GITHUB_TOKEN`
-can read, push, retag and prune without changing package visibility.
-`portal` is the exception: this repo never touches it. The release points
-Coolify at `ghcr.io/idleot/portal:<sha>` (setting the image name too) and
-dispatches `idleot/portal` `build-image.yml` with `latest=true` to move `:latest`.
+Every private package (`otclient-wasm`, `tibia-desktop`, `cdn`, `cdn-assets`,
+`crystalserver`) grants this repo **Actions access: Admin**. Portal images stay
+in `idleot/portal`; release only points Coolify at `portal:<sha>`.

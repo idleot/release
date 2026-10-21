@@ -11,8 +11,10 @@ Env:
   GH_TOKEN     token that can read idleot/idleot (and idleot/portal contents)
   OWNER        GitHub org (idleot)
   REF          umbrella tag or commit
-  COMPONENTS   auto | all | client | server | portal | launcher | server+portal | assets
-  SKIP_BUILD   true to redeploy existing images only
+  COMPONENTS        auto | all | client | server | portal | launcher | server+portal | assets
+  SKIP_BUILD        true to redeploy existing images only
+  BUILD_IF_MISSING  true to compile when GHCR tags are absent (default false —
+                    release fails fast; warm builds should have pushed :<sha>)
 
 Writes key=value lines to $GITHUB_OUTPUT (and stdout).
 """
@@ -104,6 +106,7 @@ def main() -> int:
     ref = os.environ["REF"].strip()
     mode = (os.environ.get("COMPONENTS") or "auto").strip()
     skip_build = os.environ.get("SKIP_BUILD", "false").lower() == "true"
+    build_if_missing = os.environ.get("BUILD_IF_MISSING", "false").lower() == "true"
 
     current = pins(repo, ref)
     tags = release_tags(repo)
@@ -156,7 +159,10 @@ def main() -> int:
         "portal": str("portal" in selected).lower(),
         "launcher": str("launcher" in selected).lower(),
         "promote": str(bool(selected & {"client", "launcher"}) or mode == "assets").lower(),
-        "build": str(not skip_build).lower(),
+        # Default: do not compile on the release critical path. Warm workflows
+        # (or build_if_missing=true) must have pushed :<sha> already.
+        "build": str((not skip_build) and build_if_missing).lower(),
+        "require_images": str((not skip_build) and (not build_if_missing)).lower(),
         "is_tag": str(ref in tags).lower(),
     }
     lines = "".join(f"{k}={v}\n" for k, v in out.items())

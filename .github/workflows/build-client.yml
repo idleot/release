@@ -6,7 +6,7 @@
 #
 # This repo is public (free runners), so:
 #   - Compiler output goes to files; logs show only an error summary.
-#   - No layer/compiler caches of product code; only the pinned Qt SDK.
+#   - Opaque caches only: pinned Qt SDK/emsdk + ccache object store (no source).
 #   - Artifacts hold only the content store the CDN publishes anyway.
 #
 # Desktop: tibia (Qt/QML in src/tibia) → image tibia-desktop. Browser: tibia+
@@ -108,14 +108,27 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build python3-venv libegl1-mesa-dev libfontconfig1-dev \
+          sudo apt-get install -y -qq ninja-build python3-venv ccache libegl1-mesa-dev libfontconfig1-dev \
             libxkbcommon-dev gzip brotli >/dev/null
+          ccache --max-size=3G
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
 
       - name: Cache Qt
         uses: actions/cache@v4
         with:
           path: ~/Qt
           key: qt-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}
+
+      - name: Cache ccache (wasm)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-
+            ccache-wasm-
 
       - name: Install Qt for WebAssembly + emsdk
         run: bash tools/qt/install-qt.sh --wasm
@@ -127,9 +140,11 @@ jobs:
             grep -E "(error|Error|FAILED|CMake Error)" "$1" | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 60
             echo "::endgroup::"
           }
+          mkdir -p "$CCACHE_DIR"
           if ! bash deploy/build-tibia.sh --wasm > "$RUNNER_TEMP/wasm-build.log" 2>&1; then
             summary "$RUNNER_TEMP/wasm-build.log"; exit 1
           fi
+          ccache -s || true
           echo "build ok ($(wc -l < "$RUNNER_TEMP/wasm-build.log") lines suppressed)"
           NOTES="$(find build/tibia-wasm -name tibia-wasm-size.txt -type f | head -1 || true)"
           [[ -n "$NOTES" ]] || { echo "::error::tibia-wasm-size.txt missing"; exit 1; }
@@ -216,7 +231,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq autoconf autoconf-archive automake gcc-14 g++-14 \
+          sudo apt-get install -y -qq autoconf autoconf-archive automake gcc-14 g++-14 ccache \
             libgl1-mesa-dev libglu1-mesa-dev libltdl-dev libtool libtool-bin \
             libx11-dev libx11-xcb-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev \
             linux-libc-dev make ninja-build perl pkg-config \
@@ -224,16 +239,35 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-0 >/dev/null
           echo "CC=gcc-14" >> "$GITHUB_ENV"
           echo "CXX=g++-14" >> "$GITHUB_ENV"
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          ccache --max-size=4G
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew list ninja >/dev/null 2>&1 || brew install ninja
+        run: |
+          brew list ninja >/dev/null 2>&1 || brew install ninja
+          brew list ccache >/dev/null 2>&1 || brew install ccache
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          ccache --max-size=4G
 
       - name: Restore Qt
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/Qt
           key: qt-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}
+
+      - name: Cache ccache (desktop)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-
+            ccache-${{ matrix.platform }}-
 
       - name: Install Qt
         shell: bash
@@ -245,6 +279,7 @@ jobs:
           prefix="$(bash tools/qt/qt-prefix.sh)"
           [[ -n "$prefix" ]] || { echo "::error::Qt install finished but tools/qt/qt-prefix.sh finds no Qt"; exit 1; }
           echo "QT_PREFIX=$prefix" >> "$GITHUB_ENV"
+          mkdir -p "${CCACHE_DIR:-$RUNNER_TEMP/ccache}"
 
       - name: Remove Windows pre-installed MySQL
         if: runner.os == 'Windows'
@@ -294,6 +329,7 @@ jobs:
             exit 1
           fi
           echo "launcher build ok ($(wc -l < "$RUNNER_TEMP/launcher-build.log") lines suppressed)"
+          ccache -s 2>/dev/null || true
 
       - name: Upload Windows build log
         if: failure() && runner.os == 'Windows'
