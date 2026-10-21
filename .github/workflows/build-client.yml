@@ -331,11 +331,14 @@ jobs:
           # Force ccache on every desktop platform. Windows preset defaults to sccache,
           # which is not installed in CI — without this override the Windows ccache
           # store stayed empty (~184 B) and every run was a cold MSVC compile.
+          # CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded (/Z7): MSVC /Zi PDBs make
+          # ccache report ~0.3% cacheable calls (linux/mac hit ~96% on the same SHA).
           args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
                 -DOPTIONS_ENABLE_CCACHE=ON -DOPTIONS_ENABLE_SCCACHE=OFF
                 -DCMAKE_PREFIX_PATH="$QT_PREFIX")
           if [[ "$RUNNER_OS" == Windows ]]; then
-            args+=(-DBUILD_STATIC_LIBRARY=OFF)
+            args+=(-DBUILD_STATIC_LIBRARY=OFF
+                   -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded)
             export PATH="/c/ProgramData/chocolatey/bin:$PATH"
           fi
           if ! cmake --preset "${{ matrix.preset }}" "${args[@]}" > "$RUNNER_TEMP/configure.log" 2>&1; then
@@ -365,8 +368,20 @@ jobs:
           fi
           echo "launcher build ok ($(wc -l < "$RUNNER_TEMP/launcher-build.log") lines suppressed)"
           echo "::group::ccache stats (${{ matrix.platform }})"
-          ccache -s
+          ccache -sv 2>/dev/null || ccache -s
           echo "::endgroup::"
+          # Guard against silent /Zi regressions: cacheable ratio must look like
+          # linux/mac (~99%), not the old Windows 0.3% uncacheable-PDB mode.
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            cacheable_pct="$(ccache -s | awk '/Cacheable calls:/{gsub(/[()%]/,"",$NF); print $NF; exit}')"
+            if [[ -n "$cacheable_pct" ]]; then
+              echo "windows cacheable_pct=${cacheable_pct}"
+              awk -v p="$cacheable_pct" 'BEGIN{exit !(p+0 >= 50)}' || {
+                echo "::error::Windows ccache cacheable calls are ${cacheable_pct}% (want ≥50). MSVC is likely still on /Zi — check CMAKE_MSVC_DEBUG_INFORMATION_FORMAT."
+                exit 1
+              }
+            fi
+          fi
 
       - name: Upload Windows build log
         if: failure() && runner.os == 'Windows'
