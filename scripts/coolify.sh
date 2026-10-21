@@ -7,11 +7,14 @@
 #   coolify.sh get-image <app-uuid>            print docker_registry_image_tag
 # Env: COOLIFY_URL, COOLIFY_TOKEN. Output is limited to statuses — no URLs or
 # response bodies, since this runs in a public repo.
+# Optional: COOLIFY_DEPLOY_TIMEOUT (seconds, default 1200),
+#           COOLIFY_DEPLOY_RETRIES (attempts, default 1).
 set -euo pipefail
 
 : "${COOLIFY_URL:?}" "${COOLIFY_TOKEN:?}"
 API="${COOLIFY_URL%/}/api/v1"
 TIMEOUT="${COOLIFY_DEPLOY_TIMEOUT:-1200}"
+RETRIES="${COOLIFY_DEPLOY_RETRIES:-1}"
 
 call() {
   local method="$1" path="$2" body="${3:-}"
@@ -22,6 +25,41 @@ call() {
 }
 
 json() { python3 -c "import json,sys; d=json.load(open('$RUNNER_TEMP/coolify.json')); print($1)"; }
+
+cancel_dep() {
+  local dep="$1"
+  # Best-effort: Coolify 4.x accepts POST /deployments/{uuid}/cancel.
+  call POST "/deployments/${dep}/cancel" >/dev/null || true
+}
+
+wait_dep() {
+  local dep="$1"
+  local deadline=$((SECONDS + TIMEOUT))
+  while (( SECONDS < deadline )); do
+    sleep 10
+    code="$(call GET "/deployments/${dep}")"
+    [[ "$code" =~ ^2 ]] || continue
+    status="$(json "d.get('status','')")"
+    case "$status" in
+      finished) echo "[coolify] deployment finished"; return 0 ;;
+      failed|cancelled*|error) echo "[coolify] deployment ${status}"; return 1 ;;
+    esac
+  done
+  echo "[coolify] deployment timed out after ${TIMEOUT}s — cancelling"
+  cancel_dep "$dep"
+  return 1
+}
+
+deploy_once() {
+  local uuid="$1"
+  local code dep
+  code="$(call POST "/deploy?uuid=${uuid}")"
+  if [[ "$code" == 404 || "$code" == 405 ]]; then code="$(call GET "/deploy?uuid=${uuid}")"; fi
+  [[ "$code" =~ ^2 ]] || { echo "::error::coolify deploy failed (HTTP ${code})"; return 1; }
+  dep="$(json "d['deployments'][0]['deployment_uuid']")"
+  echo "[coolify] deployment queued (${dep})"
+  wait_dep "$dep"
+}
 
 cmd="$1"; uuid="$2"; shift 2
 case "$cmd" in
@@ -41,23 +79,20 @@ case "$cmd" in
     echo "[coolify] image ${name:-<unchanged>}:${tag}"
     ;;
   deploy)
-    code="$(call POST "/deploy?uuid=${uuid}")"
-    if [[ "$code" == 404 || "$code" == 405 ]]; then code="$(call GET "/deploy?uuid=${uuid}")"; fi
-    [[ "$code" =~ ^2 ]] || { echo "::error::coolify deploy failed (HTTP ${code})"; exit 1; }
-    dep="$(json "d['deployments'][0]['deployment_uuid']")"
-    echo "[coolify] deployment queued"
-    deadline=$((SECONDS + TIMEOUT))
-    while (( SECONDS < deadline )); do
-      sleep 10
-      code="$(call GET "/deployments/${dep}")"
-      [[ "$code" =~ ^2 ]] || continue
-      status="$(json "d.get('status','')")"
-      case "$status" in
-        finished) echo "[coolify] deployment finished"; exit 0 ;;
-        failed|cancelled*|error) echo "::error::coolify deployment ${status}"; exit 1 ;;
-      esac
+    attempt=1
+    while (( attempt <= RETRIES )); do
+      echo "[coolify] deploy attempt ${attempt}/${RETRIES}"
+      if deploy_once "$uuid"; then
+        exit 0
+      fi
+      if (( attempt == RETRIES )); then
+        echo "::error::coolify deployment failed after ${RETRIES} attempt(s)"
+        exit 1
+      fi
+      echo "[coolify] retrying in 20s"
+      sleep 20
+      attempt=$((attempt + 1))
     done
-    echo "::error::coolify deployment timed out after ${TIMEOUT}s"; exit 1
     ;;
   get-env)
     key="$1"

@@ -5,7 +5,8 @@
 #   resolve -> build client / server / portal / launcher (parallel, skipped if built)
 #           -> bundle the CDN image (exact slice tags) — nothing is live yet
 #           -> close the portal login gate (client or server releases) + drop sessions
-#           -> deploy server + portal + cdn (+ pages) together
+#           -> deploy CDN first (large image pull; Coolify concurrent_builds=1),
+#              then server + portal (+ pages) together
 #           -> reopen the gate once the CDN serves the new release revision
 #              (any failure: roll every app back to what was live, reopen)
 #           -> move :latest to what is live, GitHub Release on the umbrella tag
@@ -224,10 +225,47 @@ jobs:
             *) exit "$rc" ;;
           esac
 
+  # Coolify host uses concurrent_builds=1. A hung CDN pull (~3–4GB) used to
+  # queue server/portal until they hit COOLIFY_DEPLOY_TIMEOUT. Pull CDN first
+  # (with retries); only then switch server + portal.
+  deploy-cdn:
+    name: Deploy CDN
+    needs: [resolve, bundle, close-gate]
+    if: >-
+      always() && needs.bundle.result == 'success' && needs.close-gate.result == 'success' &&
+      contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: release
+    env:
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+      COOLIFY_DEPLOY_TIMEOUT: "1500"
+      COOLIFY_DEPLOY_RETRIES: "3"
+      APP: ${{ vars.COOLIFY_CDN_UUID }}
+      TAG: ${{ needs.bundle.outputs.tag }}
+      CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Point idleot-cdn at cdn:${{ env.TAG }}
+        run: |
+          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
+          bash scripts/coolify.sh image "$APP" "$TAG"
+          bash scripts/coolify.sh deploy "$APP"
+      - name: Wait for the CDN
+        run: |
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null "$CDN_URL/latest/release.json" && { echo "cdn up"; exit 0; }
+            sleep 10
+          done
+          echo "::error::CDN did not serve latest/release.json"; exit 1
+
   deploy-server:
     name: Deploy server
-    needs: [resolve, close-gate]
-    if: always() && needs.resolve.outputs.server == 'true' && needs.close-gate.result == 'success'
+    needs: [resolve, close-gate, deploy-cdn]
+    if: >-
+      always() && needs.resolve.outputs.server == 'true' && needs.close-gate.result == 'success' &&
+      (needs.deploy-cdn.result == 'success' || needs.deploy-cdn.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
@@ -264,8 +302,10 @@ jobs:
 
   deploy-portal:
     name: Deploy portal
-    needs: [resolve, close-gate]
-    if: always() && needs.resolve.outputs.portal == 'true' && needs.close-gate.result == 'success'
+    needs: [resolve, close-gate, deploy-cdn]
+    if: >-
+      always() && needs.resolve.outputs.portal == 'true' && needs.close-gate.result == 'success' &&
+      (needs.deploy-cdn.result == 'success' || needs.deploy-cdn.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -296,36 +336,6 @@ jobs:
             sleep 10
           done
           echo "::error::site did not come back"; exit 1
-
-  deploy-cdn:
-    name: Deploy CDN
-    needs: [resolve, bundle, close-gate]
-    if: >-
-      always() && needs.bundle.result == 'success' && needs.close-gate.result == 'success' &&
-      contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image')
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: release
-    env:
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      APP: ${{ vars.COOLIFY_CDN_UUID }}
-      TAG: ${{ needs.bundle.outputs.tag }}
-      CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://cdn.idleot.com' }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Point idleot-cdn at cdn:${{ env.TAG }}
-        run: |
-          [[ -n "$APP" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
-          bash scripts/coolify.sh image "$APP" "$TAG"
-          bash scripts/coolify.sh deploy "$APP"
-      - name: Wait for the CDN
-        run: |
-          for _ in $(seq 1 30); do
-            curl -fsS -o /dev/null "$CDN_URL/latest/release.json" && { echo "cdn up"; exit 0; }
-            sleep 10
-          done
-          echo "::error::CDN did not serve latest/release.json"; exit 1
 
   deploy-pages:
     name: Deploy GitHub Pages
