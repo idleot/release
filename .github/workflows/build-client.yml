@@ -254,6 +254,24 @@ jobs:
           echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
           ccache --max-size=4G
 
+      # windows-release preset enables sccache, but CI never installed it (or ccache).
+      # Use ccache on all three desktop platforms and the same GHA cache path.
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install ccache ninja -y --no-progress
+          # Git Bash PATH often misses Chocolatey shims until refreshed.
+          echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+          export PATH="/c/ProgramData/chocolatey/bin:$PATH"
+          command -v ccache >/dev/null || { echo "::error::ccache not on PATH after choco install"; exit 1; }
+          command -v ninja >/dev/null || { echo "::error::ninja not on PATH after choco install"; exit 1; }
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          ccache --version
+          ccache --max-size=4G
+
       - name: Restore Qt
         uses: actions/cache@v4
         with:
@@ -280,6 +298,15 @@ jobs:
           [[ -n "$prefix" ]] || { echo "::error::Qt install finished but tools/qt/qt-prefix.sh finds no Qt"; exit 1; }
           echo "QT_PREFIX=$prefix" >> "$GITHUB_ENV"
           mkdir -p "${CCACHE_DIR:-$RUNNER_TEMP/ccache}"
+          # Zero stats after restore so the post-build summary shows this run's hit rate.
+          if command -v ccache >/dev/null; then
+            ccache --max-size=4G
+            ccache -z
+            ccache -s || true
+          else
+            echo "::error::ccache missing on ${{ matrix.platform }} — desktop builds must be cached"
+            exit 1
+          fi
 
       - name: Remove Windows pre-installed MySQL
         if: runner.os == 'Windows'
@@ -301,13 +328,21 @@ jobs:
             grep -nE "(error C[0-9]|fatal error|error:|LNK[0-9])" "$1" | cut -c1-500 | head -n 30
             echo "::endgroup::"
           }
+          # Force ccache on every desktop platform. Windows preset defaults to sccache,
+          # which is not installed in CI — without this override the Windows ccache
+          # store stayed empty (~184 B) and every run was a cold MSVC compile.
           args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
+                -DOPTIONS_ENABLE_CCACHE=ON -DOPTIONS_ENABLE_SCCACHE=OFF
                 -DCMAKE_PREFIX_PATH="$QT_PREFIX")
           if [[ "$RUNNER_OS" == Windows ]]; then
             args+=(-DBUILD_STATIC_LIBRARY=OFF)
+            export PATH="/c/ProgramData/chocolatey/bin:$PATH"
           fi
           if ! cmake --preset "${{ matrix.preset }}" "${args[@]}" > "$RUNNER_TEMP/configure.log" 2>&1; then
             summary "$RUNNER_TEMP/configure.log"; exit 1
+          fi
+          if ! grep -qiE "ccache|compiler launcher" "$RUNNER_TEMP/configure.log"; then
+            echo "::warning::configure log has no ccache mention — check OPTIONS_ENABLE_CCACHE"
           fi
           echo "configure ok ($(wc -l < "$RUNNER_TEMP/configure.log") lines suppressed)"
           if ! cmake --build --preset "${{ matrix.preset }}" --target tibia > "$RUNNER_TEMP/build.log" 2>&1; then
@@ -329,7 +364,9 @@ jobs:
             exit 1
           fi
           echo "launcher build ok ($(wc -l < "$RUNNER_TEMP/launcher-build.log") lines suppressed)"
-          ccache -s 2>/dev/null || true
+          echo "::group::ccache stats (${{ matrix.platform }})"
+          ccache -s
+          echo "::endgroup::"
 
       - name: Upload Windows build log
         if: failure() && runner.os == 'Windows'
