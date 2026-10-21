@@ -39,8 +39,10 @@ intentionally want the release to compile.
   key. Opening waits until the portal reads the new `latest/release.json`
   revision. The gate closes only for server or client releases.
 - **CDN** — thin `ghcr.io/idleot/cdn:runtime-*` (nginx + config). The site tree
-  lives on the Coolify host at `/data/idleot-cdn/html` and is updated with
-  `scripts/sync-cdn.sh` (rsync). Coolify mounts that path read-only.
+  lives on the Coolify host at `/data/idleot-cdn/html` (source of truth for
+  blobs). Bundle pulls only `latest/` + `releases/` into CI, assembles deltas,
+  then `sync-cdn.sh` merges content/packs/client/launcher additively and
+  replaces `latest/` + `releases/`. Coolify mounts the volume read-only.
 - **Auto rollback** — restores server/portal Coolify tags and
   `sync-cdn.sh rollback` for `latest/` on the volume.
 - **Stuck closed:** `SITE_URL=https://www.idleot.com RELEASE_GATE_TOKEN=... bash scripts/gate.sh open`.

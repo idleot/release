@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rsync an assembled CDN site tree onto the Coolify host volume.
+# Rsync an assembled CDN delta onto the Coolify host volume.
 #   sync-cdn.sh push <site-dir>     # merge blobs + flip manifests
 #   sync-cdn.sh rollback            # restore previous latest/ snapshot on host
 #
@@ -10,12 +10,9 @@
 # Optional:
 #   CDN_REMOTE_ROOT  default /data/idleot-cdn
 #
-# Layout on host:
-#   $CDN_REMOTE_ROOT/html/     live document root (Coolify bind-mount)
-#   $CDN_REMOTE_ROOT/previous-latest/  last latest/ for rollback
-#
-# content/ and packs/ are merged additively (no --delete) so CI does not need
-# to download the multi-GB blob store. Everything else uses --delete.
+# Host volume is source of truth for large trees. CI only uploads what this
+# assemble produced; we never --delete under content/ packs/ client/ launcher/
+# installers/ assets/ images/. Only latest/ and releases/ are replaced.
 set -euo pipefail
 
 : "${CDN_SSH_HOST:?}"
@@ -50,15 +47,65 @@ fi
 EOF
 }
 
+# Additive merge of one directory tree (no --delete).
+push_tree() {
+  local name="$1"
+  [[ -d "${site}/${name}" ]] || return 0
+  remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
+  rsync -a --info=stats2 -e "$RSYNC_SSH" \
+    "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
+}
+
+# Replace one directory wholesale (delete stale files inside it only).
+replace_tree() {
+  local name="$1"
+  [[ -d "${site}/${name}" ]] || return 0
+  remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
+  rsync -a --delete --info=stats2 -e "$RSYNC_SSH" \
+    "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
+}
+
+# Drop host client/<rev> and launcher/<ver> not listed in this assemble's history.
+prune_host_history() {
+  local sources="${site}/latest/sources.json"
+  [[ -f "$sources" ]] || return 0
+  local wasm_keep launcher_keep
+  wasm_keep="$(python3 -c "import json; h=json.load(open(r'''$sources''')).get('history') or {}; print(' '.join(h.get('wasm') or []))")"
+  launcher_keep="$(python3 -c "import json; h=json.load(open(r'''$sources''')).get('history') or {}; print(' '.join(h.get('launcher') or []))")"
+  remote bash -s <<EOF
+set -euo pipefail
+HTML='${CDN_REMOTE_ROOT}/html'
+prune_one() {
+  local sub="\$1"; shift
+  local -a keep=("\$@")
+  [[ -d "\$HTML/\$sub" ]] || return 0
+  local d name k found
+  for d in "\$HTML/\$sub"/*; do
+    [[ -d "\$d" ]] || continue
+    name="\${d##*/}"
+    found=0
+    for k in "\${keep[@]+"\${keep[@]}"}"; do
+      [[ "\$name" == "\$k" ]] && { found=1; break; }
+    done
+    if [[ \$found -eq 0 ]]; then
+      echo "[sync-cdn] pruning \$sub/\$name"
+      rm -rf "\$d"
+    fi
+  done
+}
+prune_one client ${wasm_keep}
+prune_one launcher ${launcher_keep}
+EOF
+}
+
 case "$cmd" in
   push)
     site="${1:?site directory}"
     [[ -d "$site" ]] || { echo "::error::missing site dir $site"; exit 1; }
     [[ -f "$site/latest/release.json" ]] || { echo "::error::missing $site/latest/release.json"; exit 1; }
     setup_ssh
-    remote "mkdir -p '${CDN_REMOTE_ROOT}/html/content' '${CDN_REMOTE_ROOT}/html/packs' '${CDN_REMOTE_ROOT}/previous-latest'"
+    remote "mkdir -p '${CDN_REMOTE_ROOT}/html' '${CDN_REMOTE_ROOT}/previous-latest'"
 
-    # Snapshot live latest/ for rollback before we touch manifests.
     remote bash -s <<EOF
 set -euo pipefail
 ROOT='${CDN_REMOTE_ROOT}'
@@ -69,22 +116,23 @@ if [[ -d "\$ROOT/html/latest" ]]; then
 fi
 EOF
 
-    # Additive blob merge (never delete host content/packs).
-    if [[ -d "$site/content" ]]; then
-      rsync -a --info=stats2 -e "$RSYNC_SSH" \
-        "${site}/content/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/content/"
-    fi
-    if [[ -d "$site/packs" ]]; then
-      rsync -a --info=stats2 -e "$RSYNC_SSH" \
-        "${site}/packs/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/packs/"
-    fi
+    # Large / content-addressed trees: merge only.
+    for d in content packs client launcher installers assets images; do
+      push_tree "$d"
+    done
 
-    # Manifests + client/assets/launcher/etc. — delete stale files in those trees only.
-    rsync -a --delete --info=stats2 \
-      --exclude content/ --exclude packs/ \
-      -e "$RSYNC_SSH" \
-      "${site}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/"
+    # Manifests: full replace so stale release JSON and latest pointers go away.
+    replace_tree latest
+    replace_tree releases
 
+    # Root tip-of-day files.
+    for f in healthz hints.json; do
+      if [[ -f "${site}/${f}" ]]; then
+        rsync -a -e "$RSYNC_SSH" "${site}/${f}" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${f}"
+      fi
+    done
+
+    prune_host_history
     reload_nginx
     echo "[sync-cdn] push ok"
     ;;

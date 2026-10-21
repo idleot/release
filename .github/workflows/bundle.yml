@@ -3,8 +3,8 @@
 # image when config changes, and leave the tree for release.yml to rsync onto
 # the Coolify host volume. Does not flip live CDN or move :latest.
 #
-# Previous tree is pulled from the live host volume when CDN_SSH_* is set;
-# otherwise falls back to extracting ghcr.io/idleot/cdn:latest (legacy fat image).
+# Host volume is source of truth for blobs. CI pulls only latest/ + releases/
+# (~MBs) for history, assembles new slices, then sync-cdn merges additively.
 #
 # Targets — repository variable IDLEOT_CDN_TARGETS (default "image"):
 #   image  Coolify idleot-cdn (thin runtime + /data/idleot-cdn/html volume)
@@ -108,31 +108,32 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull previous tree (metadata only)
+      - name: Pull previous manifests
         env:
           CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
           CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
           CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
           CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
         run: |
-          # Skip content/ + packs/ (~multi-GB). Those stay on the host volume;
-          # sync-cdn.sh merges new blobs without deleting existing ones.
+          # Only latest/ + releases/ (~MBs). Blobs and client/launcher trees stay on the host.
           mkdir -p slices/previous
           CDN_SSH_USER="${CDN_SSH_USER:-root}"
           if [[ -n "${CDN_SSH_HOST:-}" && -n "${CDN_SSH_KEY:-}" ]]; then
             KEY_FILE="$RUNNER_TEMP/cdn_ssh_key"
             umask 077
             printf '%s\n' "$CDN_SSH_KEY" > "$KEY_FILE"
-            rsync -a \
-              --exclude content/ --exclude packs/ \
-              -e "ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes" \
-              "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/" slices/previous/ \
-              || echo "::warning::rsync previous tree failed — assembling without previous"
+            RSYNC_SSH="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+            for d in latest releases; do
+              rsync -a -e "$RSYNC_SSH" \
+                "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${d}/" "slices/previous/${d}/" \
+                || echo "::warning::no remote ${d}/ — assembling without it"
+            done
+            # Optional tip-of-day root file for continuity.
+            rsync -a -e "$RSYNC_SSH" \
+              "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/hints.json" slices/previous/hints.json \
+              2>/dev/null || true
           else
-            echo "::notice::CDN_SSH_* unset — extracting previous from cdn:latest if present"
-            bash scripts/extract-image.sh "$REGISTRY/cdn:latest" /usr/share/nginx/html slices/previous || true
-            # Drop fat blobs if we pulled a legacy full image.
-            rm -rf slices/previous/content slices/previous/packs
+            echo "::notice::CDN_SSH_* unset — cold assemble from slices only"
           fi
           du -sh slices/previous 2>/dev/null || true
 
@@ -144,7 +145,6 @@ jobs:
           ASSETS_TAG: ${{ inputs.assets_tag }}
           LAUNCHER_TAG: ${{ inputs.launcher_tag }}
         run: |
-          # Only pull slices we need; empty dirs are fine for assemble.
           bash scripts/extract-image.sh "$REGISTRY/otclient-wasm:${WASM_TAG}" / slices/wasm
           bash scripts/extract-image.sh "$REGISTRY/${DESKTOP_IMAGE}:${DESKTOP_TAG}" / slices/desktop
           bash scripts/extract-image.sh "$REGISTRY/cdn-assets:${ASSETS_TAG}" / slices/assets
@@ -156,6 +156,7 @@ jobs:
         run: |
           prev=()
           [[ -d slices/previous/latest ]] && prev=(--previous slices/previous)
+          # Delta site: new slices + carried manifests. Host keeps old client/launcher blobs.
           python3 scripts/assemble.py --out site --cdn-url "$CDN_URL" \
             "${prev[@]}" --wasm slices/wasm \
             --desktop slices/desktop --assets slices/assets --launcher slices/launcher \

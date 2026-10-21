@@ -2,7 +2,7 @@
 """Assemble the IdleOT CDN bundle tree from producer slices.
 
 Inputs (directories extracted from images; any may be missing):
-  --previous  tree of the last ghcr.io/idleot/cdn image (/usr/share/nginx/html)
+  --previous  prior CDN tip (usually host latest/ + releases/ only; blobs stay on host)
   --wasm      browser wasm slice    (client/<rev>/wasm/tibia.*, .idleot/wasm.json)
   --desktop   tibia-desktop slice (engine-<platform> + content-desktop lists)
   --assets    cdn-assets slice      (assets/{store,outfits,items}/*, content-things list, .idleot/assets.json)
@@ -259,9 +259,9 @@ def main() -> int:
     }
 
     if previous:
-        for name in ("client", "assets", "releases", "content", "packs", "launcher", "installers", "images"):
-            copy_tree(previous / name, out / name)
-        # Tip-of-the-day feed (CIP /hints.json); emit_cip overwrites when vendored.
+        # Host-authoritative CDN: previous is manifests only (latest/ + releases/).
+        # Blobs and client/launcher trees stay on the host; sync-cdn merges them.
+        copy_tree(previous / "releases", out / "releases")
         prev_hints = previous / "hints.json"
         if prev_hints.is_file():
             shutil.copy2(prev_hints, out / "hints.json")
