@@ -31,6 +31,10 @@ from pathlib import Path
 
 OTC = Path(__file__).resolve().parents[2] / "otclient"
 
+# Tip packages[].name + directoryname → packages/<name>/ on disk.
+# Soft uses "Tibia" / "Tibia.app"; IdleOT overrides both to this value.
+CLIENT_PACKAGE_DIR = "IdleOT"
+
 # (os, architecture field, v3 engine target or "web", launcher dir, client dir)
 PLATFORMS = (
     ("windows", "x86_64", "windows-x64", "launcher-windows-current", "tibiaclient-windows-current"),
@@ -360,9 +364,9 @@ def emit_cip(
     metadata = {
         "launcher": {"name": "LAUNCHER", "builds": launcher_builds},
         "packages": [{
-            "name": "Tibia",
+            "name": CLIENT_PACKAGE_DIR,
             "variant": "regular",
-            "directoryname": "Tibia",
+            "directoryname": CLIENT_PACKAGE_DIR,
             "logolinktarget": "https://www.idleot.com/",
             "installautomatically": True,
             "builds": packages_builds,
@@ -402,6 +406,28 @@ def emit_cip(
             ):
                 continue
             target = out / "images" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists() or target.stat().st_size != path.stat().st_size:
+                shutil.copy2(path, target)
+        break
+    # /play CSS backdrop + CIP launcher chrome (IdleOT replacements).
+    launcher_img_roots = (
+        release_root / "vendor" / "launcher-hints" / "images" / "launcher",
+        Path(__file__).resolve().parents[2]
+        / "otclient"
+        / "src"
+        / "tibia"
+        / "launcher"
+        / "images"
+        / "launcher",
+    )
+    for chrome in launcher_img_roots:
+        if not chrome.is_dir():
+            continue
+        for path in chrome.iterdir():
+            if not path.is_file() or path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+                continue
+            target = out / "images" / "launcher" / path.name
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists() or target.stat().st_size != path.stat().st_size:
                 shutil.copy2(path, target)
