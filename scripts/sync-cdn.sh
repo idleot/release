@@ -148,11 +148,10 @@ push_blobs() {
   for d in content packs client; do
     push_immutable "$d"
   done
-  # launcher/<ver>/ packages are versioned (ignore-existing). The live CIP tip
-  # launcher/assets-current/ must overwrite when sprites/assetsRevision move.
+  # launcher/<ver>/ packages are versioned (ignore-existing). Live CIP tips
+  # (*-current) must overwrite so /play and the desktop launcher see new WASM.
   if [[ -d "${site}/launcher" ]]; then
     remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher'"
-    # Versioned launcher builds (launcher-*-current, IdleOT-*, numbered dirs).
     for child in "${site}/launcher"/*; do
       [[ -e "$child" ]] || continue
       name="$(basename "$child")"
@@ -164,6 +163,9 @@ push_blobs() {
         else
           replace_tree "launcher/assets-current"
         fi
+      elif [[ -d "$child" && "$name" == *-current ]]; then
+        # launcher-web-current, tibiaclient-*-current, etc.
+        replace_tree "launcher/${name}"
       elif [[ -d "$child" ]]; then
         remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher/${name}'"
         rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
@@ -197,6 +199,9 @@ prune_one() {
   for d in "\$HTML/\$sub"/*; do
     [[ -d "\$d" ]] || continue
     name="\${d##*/}"
+    # CIP live tips (launcher-web-current, tibiaclient-*-current, assets-current)
+    # are not version history — never prune them.
+    [[ "\$name" == *-current ]] && continue
     found=0
     for k in "\${keep[@]+"\${keep[@]}"}"; do
       [[ "\$name" == "\$k" ]] && { found=1; break; }

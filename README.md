@@ -24,12 +24,12 @@ and `build_if_missing=false`. Missing `:<sha>` tags fail fast.
 ```
 resolve -> require warm GHCR images (or build_if_missing)
         -> bundle      (assemble site; push thin nginx runtime; artifact site/)
-        -> record-live (Coolify tags for rollback)
+        -> record-live (compose image tags for rollback)
         -> deploy server (when changed) → CDN tip flip → portal | Pages
         -> :latest = live, GitHub Release on the umbrella tag
 ```
 
-When images are already warm, the flip is assemble + rsync + Coolify/compose
+When images are already warm, the flip is assemble + rsync + compose
 switches (typically minutes). Pass `build_if_missing=true` only when you
 intentionally want the release to compile.
 
@@ -38,14 +38,14 @@ world (clients see unreachable / connection-lost), flip
 `https://static.idleot.com` tips, then portal. Package updates stay in the
 launcher (`/launcher/tibiametadata.json`).
 
-- **Promote** — `scripts/deployctl` names apps (`server` / `portal` / `cdn`);
-  Coolify UUIDs stay in GitHub env vars. Set `IDLEOT_DEPLOY_BACKEND=compose-ssh`
-  to target the umbrella Compose stack instead.
+- **Promote** — `scripts/deployctl` with `IDLEOT_DEPLOY_BACKEND=compose-ssh`
+  (default): SSH + `docker compose` at `/opt/idleot/stack`. Apps:
+  `server` / `portal` / `cdn`.
 - **CDN** — thin `ghcr.io/idleot/cdn:runtime-*` (nginx + config). Site tree on
-  the host at `/data/idleot-cdn/html`. Bundle uploads immutable blobs with
-  `sync-cdn.sh blobs` (`--ignore-existing`), then Deploy CDN runs
+  the host at `/data/idleot-cdn/html` (compose bind-mount). Bundle uploads
+  immutable blobs with `sync-cdn.sh blobs`, then Deploy CDN runs
   `sync-cdn.sh flip` for `latest/` + `releases/`. Public tip:
-  `https://static.idleot.com` (`cdn.idleot.com` is a temporary CNAME).
+  `https://static.idleot.com`.
 - **Auto rollback** — restores server/portal tags and `sync-cdn.sh rollback`
   for `latest/` on the volume.
 
@@ -99,19 +99,21 @@ Targets — `IDLEOT_CDN_TARGETS`: `image` (default), `pages`, or `image,pages`.
 | Name | Where | Purpose |
 |------|-------|---------|
 | `RELEASE_TOKEN` | `release` env secret | PAT for private repos / dispatch |
-| `COOLIFY_URL`, `COOLIFY_TOKEN` | `release` env secret | Coolify API (deployctl coolify backend) |
-| `CDN_SSH_HOST`, `CDN_SSH_KEY` | `release` env secret | rsync site tree to `/data/idleot-cdn` |
+| `CDN_SSH_HOST`, `CDN_SSH_KEY` | `release` env secret | rsync site tree + compose promote |
 | `CDN_SSH_USER` | `release` env secret (optional) | default `root` |
-| `COOLIFY_SERVER_UUID`, `COOLIFY_PORTAL_UUID`, `COOLIFY_CDN_UUID` | `release` env variable | Coolify apps (deployctl maps names → UUIDs) |
-| `IDLEOT_CDN_URL` | repo / env variable | default `https://static.idleot.com` |
+| `IDLEOT_CDN_URL` | repo / env variable | default `https://static.idleot.com` (never `cdn.idleot.com`) |
 | `IDLEOT_CDN_TARGETS` | repo variable | `image` / `pages` / `image,pages` |
 | `CDN_REMOTE_ROOT` | `release` env variable (optional) | default `/data/idleot-cdn` |
+| `COMPOSE_REMOTE_DIR` | `release` env variable (optional) | default `/opt/idleot/stack` |
 | macOS / Windows signing secrets | `release` env (optional) | as before |
 
-Host one-time: `deploy/coolify-host-setup.sh` seeds `/data/idleot-cdn/html` and
-documents Coolify `custom_docker_run_options`:
-`-v /data/idleot-cdn/html:/usr/share/nginx/html:ro`. Set Coolify
-**concurrent builds ≥ 3** so server/portal/CDN can flip together.
+Host one-time: umbrella `deploy/stack/bootstrap.sh` (or OpenTofu SSH
+bootstrap) installs Traefik + compose + Portainer and bind-mounts
+`/data/idleot-cdn/html`. See [`deploy/README.md`](../../deploy/README.md).
+
+Desktop launchers baked with `https://cdn.idleot.com` (retired) must be
+reinstalled from `/download` after a release that ships `static.idleot.com`
+as `IDLEOT_CDN_URL`. Tip `tibiametadata.json` absolute URLs also use static.
 
 ## Binary pack / update contract (CIP)
 

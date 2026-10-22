@@ -198,11 +198,11 @@ jobs:
       portal_tag: ${{ steps.live.outputs.portal_tag }}
       cdn_runtime_tag: ${{ steps.live.outputs.cdn_runtime_tag }}
     env:
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      COOLIFY_SERVER_UUID: ${{ vars.COOLIFY_SERVER_UUID }}
-      COOLIFY_PORTAL_UUID: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
-      COOLIFY_CDN_UUID: ${{ vars.COOLIFY_CDN_UUID }}
+      IDLEOT_DEPLOY_BACKEND: compose-ssh
+      CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+      CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+      CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
+      COMPOSE_REMOTE_DIR: ${{ vars.COMPOSE_REMOTE_DIR || '/opt/idleot/stack' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -214,7 +214,7 @@ jobs:
           CDN: ${{ needs.bundle.result == 'success' && contains(vars.IDLEOT_CDN_TARGETS || 'image', 'image') }}
         run: |
           if [[ "$SERVER" == true ]]; then
-            tag="$(bash scripts/deployctl get-env server IMAGE_TAG || true)"
+            tag="$(bash scripts/deployctl get-image server || true)"
             echo "server_tag=${tag}" >> "$GITHUB_OUTPUT"; echo "server: ${tag:-<unset>}"
           fi
           if [[ "$PORTAL" == true ]]; then
@@ -239,11 +239,7 @@ jobs:
     timeout-minutes: 30
     environment: release
     env:
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      COOLIFY_DEPLOY_TIMEOUT: "600"
-      COOLIFY_DEPLOY_RETRIES: "2"
-      COOLIFY_CDN_UUID: ${{ vars.COOLIFY_CDN_UUID }}
+      IDLEOT_DEPLOY_BACKEND: compose-ssh
       RUNTIME_TAG: ${{ needs.bundle.outputs.runtime_tag }}
       BUNDLE_TAG: ${{ needs.bundle.outputs.tag }}
       CDN_URL: ${{ vars.IDLEOT_CDN_URL || 'https://static.idleot.com' }}
@@ -251,6 +247,7 @@ jobs:
       CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
       CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
       CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
+      COMPOSE_REMOTE_DIR: ${{ vars.COMPOSE_REMOTE_DIR || '/opt/idleot/stack' }}
     steps:
       - uses: actions/checkout@v5
       - name: Download manifests
@@ -258,14 +255,11 @@ jobs:
         with:
           name: cdn-site-${{ env.BUNDLE_TAG }}
           path: site
-      - name: Point idleot-cdn at thin runtime (if changed)
+      - name: Point cdn compose service at thin runtime (if changed)
         run: |
-          # Redeploy BEFORE flip. Coolify dockerimage deploys have dropped the
-          # host volume mount before; we verify the mount before flipping tip.
-          # Coolify often reports "finished" before the container is listed —
-          # poll verify-mount (v1.0.62 failed on a 10s race).
+          # Redeploy BEFORE flip. Compose bind-mounts /data/idleot-cdn/html;
+          # verify-mount polls until the idleot/cdn container is healthy.
           export CDN_SSH_USER="${CDN_SSH_USER:-root}"
-          [[ -n "${COOLIFY_CDN_UUID:-}" ]] || { echo "::error::set environment variable COOLIFY_CDN_UUID"; exit 1; }
           [[ -n "$CDN_SSH_HOST" && -n "$CDN_SSH_KEY" ]] || {
             echo "::error::set CDN_SSH_HOST and CDN_SSH_KEY secrets for volume sync"
             exit 1
@@ -276,7 +270,7 @@ jobs:
               if bash scripts/sync-cdn.sh verify-mount; then
                 return 0
               fi
-              echo "[coolify] waiting for cdn container/mount (${i}/36)..."
+              echo "[compose] waiting for cdn container/mount (${i}/36)..."
               sleep 5
             done
             return 1
@@ -284,15 +278,13 @@ jobs:
           live="$(bash scripts/deployctl get-image cdn || true)"
           skipped_deploy=0
           if [[ "$live" == "$RUNTIME_TAG" || "$live" == "runtime" ]]; then
-            echo "[coolify] runtime already ${live} — skip image deploy"
+            echo "[compose] runtime already ${live} — skip image deploy"
             skipped_deploy=1
           else
             bash scripts/deployctl deploy cdn "$RUNTIME_TAG"
           fi
           if ! wait_mount; then
             if [[ "$skipped_deploy" -eq 1 ]]; then
-              # Redeploying a healthy tip is what killed v1.0.62 (Coolify uuid
-              # rename + mount race). Fail loud instead of making it worse.
               echo "::error::cdn mount verify failed but image is already ${live}; not redeploying"
               exit 1
             fi
@@ -329,9 +321,11 @@ jobs:
     timeout-minutes: 30
     environment: release
     env:
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      COOLIFY_SERVER_UUID: ${{ vars.COOLIFY_SERVER_UUID }}
+      IDLEOT_DEPLOY_BACKEND: compose-ssh
+      CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+      CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+      CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
+      COMPOSE_REMOTE_DIR: ${{ vars.COMPOSE_REMOTE_DIR || '/opt/idleot/stack' }}
       SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
       GAME_HOST: ${{ vars.IDLEOT_GAME_HOST || 'idleot.com' }}
     steps:
@@ -344,10 +338,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Require image
         run: docker buildx imagetools inspect "$REGISTRY/crystalserver:$SHA" >/dev/null
-      - name: Point idleot-server at crystalserver:${{ env.SHA }}
-        run: |
-          [[ -n "${COOLIFY_SERVER_UUID:-}" ]] || { echo "::error::set environment variable COOLIFY_SERVER_UUID"; exit 1; }
-          bash scripts/deployctl deploy server "$SHA"
+      - name: Point compose server at crystalserver:${{ env.SHA }}
+        run: bash scripts/deployctl deploy server "$SHA"
       - name: Wait for the game server
         run: |
           for _ in $(seq 1 30); do
@@ -368,17 +360,17 @@ jobs:
     timeout-minutes: 20
     environment: release
     env:
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      COOLIFY_PORTAL_UUID: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
+      IDLEOT_DEPLOY_BACKEND: compose-ssh
+      CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+      CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+      CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
+      COMPOSE_REMOTE_DIR: ${{ vars.COMPOSE_REMOTE_DIR || '/opt/idleot/stack' }}
       SHA: ${{ needs.resolve.outputs.portal_sha }}
       SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
     steps:
       - uses: actions/checkout@v5
-      - name: Point the portal app at portal:${{ env.SHA }}
-        run: |
-          [[ -n "${COOLIFY_PORTAL_UUID:-}" ]] || { echo "::error::set environment variable COOLIFY_PORTAL_UUID"; exit 1; }
-          bash scripts/deployctl deploy portal "$SHA" "$REGISTRY/portal"
+      - name: Point compose portal at portal:${{ env.SHA }}
+        run: bash scripts/deployctl deploy portal "$SHA"
       - name: Wait for the site
         run: |
           for _ in $(seq 1 30); do
@@ -416,15 +408,12 @@ jobs:
     timeout-minutes: 45
     environment: release
     env:
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-      COOLIFY_SERVER_UUID: ${{ vars.COOLIFY_SERVER_UUID }}
-      COOLIFY_PORTAL_UUID: ${{ vars.COOLIFY_PORTAL_UUID || vars.COOLIFY_AAC_UUID }}
-      COOLIFY_CDN_UUID: ${{ vars.COOLIFY_CDN_UUID }}
+      IDLEOT_DEPLOY_BACKEND: compose-ssh
       CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
       CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
       CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
       CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
+      COMPOSE_REMOTE_DIR: ${{ vars.COMPOSE_REMOTE_DIR || '/opt/idleot/stack' }}
     steps:
       - uses: actions/checkout@v5
       - name: Restore server
@@ -445,7 +434,7 @@ jobs:
             bash scripts/sync-cdn.sh rollback || echo "::warning::CDN volume rollback failed"
           fi
           TAG="${{ needs.record-live.outputs.cdn_runtime_tag }}"
-          if [[ -n "${COOLIFY_CDN_UUID:-}" && -n "$TAG" ]]; then
+          if [[ -n "$TAG" ]]; then
             bash scripts/deployctl deploy cdn "$TAG" || true
           fi
       - name: Pages

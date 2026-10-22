@@ -77,6 +77,9 @@ def prune(root: Path, keep: list[str]) -> None:
     if not root.is_dir():
         return
     for child in root.iterdir():
+        # CIP live tips (launcher-web-current, assets-current, …) are not history.
+        if child.is_dir() and child.name.endswith("-current"):
+            continue
         if child.is_dir() and child.name not in keep:
             print(f"[assemble] pruning {child}")
             shutil.rmtree(child)
@@ -283,6 +286,17 @@ def main() -> int:
     if wasm:
         copy_tree(wasm / "client", out / "client")
         sources["wasm"] = load_json(wasm / ".idleot" / "wasm.json") or sources["wasm"]
+        # Ensure a web target even when the wasm slice has no content-web v3 list
+        # (engine-only / client tree). emit_cip needs targets.web.wasm for /play;
+        # things is attached later via THINGS_TARGETS once the assets list is known.
+        wmeta = sources["wasm"] or {}
+        wrev = wmeta.get("revision") or release.get("revision") or ""
+        if wrev and (out / "client" / wrev / "wasm" / "tibia.js").is_file():
+            web = release["targets"].setdefault("web", {})
+            web.setdefault("engine", wrev)
+            web["wasm"] = f"client/{wrev}/wasm"
+            if not release.get("revision"):
+                release["revision"] = wrev
     if desktop and (desktop / "installers").is_dir():
         # Qt CIP launcher archives from package_launcher.py (overwrites previous).
         shutil.rmtree(out / "installers", ignore_errors=True)

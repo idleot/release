@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
-# Promote adapter for idleot/release workflows. Name apps, not Coolify UUIDs.
+# Promote adapter for idleot/release workflows.
 #
-#   deployctl deploy server <IMAGE_TAG>
-#   deployctl deploy portal <tag> [ghcr.io/.../portal]
-#   deployctl deploy cdn <runtime-tag>
-#   deployctl image portal <tag> [name]
-#   deployctl env portal KEY VALUE
-#   deployctl get-image portal
-#   deployctl get-env server IMAGE_TAG
+#   deployctl deploy server|portal|cdn|metrics <tag>
+#   deployctl get-image|get-env|image|env ...
 #
-# UUID mapping (GitHub `release` environment variables):
-#   server  → COOLIFY_SERVER_UUID
-#   portal  → COOLIFY_PORTAL_UUID | COOLIFY_AAC_UUID
-#   cdn     → COOLIFY_CDN_UUID
-#   metrics → COOLIFY_METRICS_UUID
-#
-# Optional IDLEOT_DEPLOY_BACKEND=compose-ssh uses COMPOSE_SSH_* / CDN_SSH_*.
+# Backend: IDLEOT_DEPLOY_BACKEND=compose-ssh|coolify (default compose-ssh).
+# compose-ssh uses COMPOSE_SSH_* or CDN_SSH_* and COMPOSE_REMOTE_DIR
+# (default /opt/idleot/stack). coolify uses COOLIFY_* (legacy).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND="${IDLEOT_DEPLOY_BACKEND:-coolify}"
+BACKEND="${IDLEOT_DEPLOY_BACKEND:-compose-ssh}"
+REMOTE_DIR="${COMPOSE_REMOTE_DIR:-/opt/idleot/stack}"
+# One SSH identity file for the whole process (avoid per-call trap clobber).
+COMPOSE_SSH_KEYFILE=""
 
 app_uuid() {
   case "$1" in
@@ -33,37 +27,150 @@ app_uuid() {
 
 coolify() { bash "$HERE/coolify.sh" "$@"; }
 
+compose_ssh_cleanup() {
+  [[ -n "${COMPOSE_SSH_KEYFILE:-}" ]] && rm -f "$COMPOSE_SSH_KEYFILE"
+}
+
+compose_ssh() {
+  local host="${COMPOSE_SSH_HOST:-${CDN_SSH_HOST:?set COMPOSE_SSH_HOST or CDN_SSH_HOST}}"
+  local user="${COMPOSE_SSH_USER:-${CDN_SSH_USER:-root}}"
+  local key="${COMPOSE_SSH_KEY:-${CDN_SSH_KEY:-}}"
+  local ssh=(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+  if [[ -n "$key" ]]; then
+    if [[ -z "$COMPOSE_SSH_KEYFILE" ]]; then
+      COMPOSE_SSH_KEYFILE="$(mktemp)"
+      printf '%s\n' "$key" >"$COMPOSE_SSH_KEYFILE"
+      chmod 600 "$COMPOSE_SSH_KEYFILE"
+      trap compose_ssh_cleanup EXIT
+    fi
+    ssh+=(-i "$COMPOSE_SSH_KEYFILE" -o IdentitiesOnly=yes)
+  fi
+  "${ssh[@]}" "${user}@${host}" "$@"
+}
+
+compose_service() {
+  case "$1" in
+    server)  echo server ;;
+    portal)  echo portal ;;
+    cdn)     echo cdn ;;
+    metrics) echo grafana ;;
+    *) echo "deployctl: unknown app '$1'" >&2; exit 2 ;;
+  esac
+}
+
+compose_tag_env() {
+  case "$1" in
+    server)  echo IMAGE_TAG ;;
+    portal)  echo PORTAL_TAG ;;
+    cdn)     echo CDN_RUNTIME_TAG ;;
+    metrics) echo METRICS_TAG ;;
+    *) echo "deployctl: unknown app '$1'" >&2; exit 2 ;;
+  esac
+}
+
+compose_deploy() {
+  local app="$1" tag="${2:-}"
+  local svc key remote_q tag_q key_q svc_q
+  svc="$(compose_service "$app")"
+  key="$(compose_tag_env "$app")"
+  remote_q="$(printf %q "$REMOTE_DIR")"
+  svc_q="$(printf %q "$svc")"
+  key_q="$(printf %q "$key")"
+  if [[ -n "$tag" ]]; then
+    tag_q="$(printf %q "$tag")"
+    compose_ssh "bash -s" <<EOF
+set -euo pipefail
+cd $remote_q
+touch .env
+if grep -qE '^'"$key_q"'=' .env; then
+  sed -i.bak -E 's|^'"$key_q"'=.*|'"$key_q"'='"$tag_q"'|' .env
+  rm -f .env.bak
+else
+  printf '%s=%s\n' $key_q $tag_q >> .env
+fi
+export $key_q=$tag_q
+docker compose pull $svc_q
+docker compose up -d $svc_q
+# Crystal is IPv4-only; re-pin Traefik game-ws after server recreate.
+if [[ $svc_q == server ]]; then
+  if [[ -x ./pin-game-ws.sh ]]; then bash ./pin-game-ws.sh || true; fi
+fi
+EOF
+  else
+    compose_ssh "bash -s" <<EOF
+set -euo pipefail
+cd $remote_q
+docker compose pull $svc_q
+docker compose up -d $svc_q
+if [[ $svc_q == server ]]; then
+  if [[ -x ./pin-game-ws.sh ]]; then bash ./pin-game-ws.sh || true; fi
+fi
+EOF
+  fi
+}
+
+compose_get_image() {
+  local app="$1"
+  local svc key remote_q svc_q key_q
+  svc="$(compose_service "$app")"
+  key="$(compose_tag_env "$app")"
+  remote_q="$(printf %q "$REMOTE_DIR")"
+  svc_q="$(printf %q "$svc")"
+  key_q="$(printf %q "$key")"
+  compose_ssh "bash -s" <<EOF
+set -euo pipefail
+cd $remote_q
+id=\$(docker compose ps -q $svc_q 2>/dev/null | head -1 || true)
+if [[ -n "\$id" ]]; then
+  docker inspect "\$id" --format '{{index .Config.Image}}' | awk -F: '{print \$NF}'
+elif [[ -f .env ]]; then
+  grep -E '^'"$key_q"'=' .env | head -1 | cut -d= -f2- || true
+fi
+EOF
+}
+
 cmd="${1:-}"; shift || true
 [[ -n "$cmd" ]] || { echo "usage: deployctl deploy|image|env|get-image|get-env ..." >&2; exit 2; }
 
 if [[ "$BACKEND" == compose-ssh ]]; then
-  host="${COMPOSE_SSH_HOST:-${CDN_SSH_HOST:?set COMPOSE_SSH_HOST or CDN_SSH_HOST}}"
-  user="${COMPOSE_SSH_USER:-${CDN_SSH_USER:-root}}"
-  remote="${COMPOSE_REMOTE_DIR:-/opt/idleot/stack}"
-  keyfile=""
-  ssh=(ssh -o StrictHostKeyChecking=accept-new)
-  if [[ -n "${COMPOSE_SSH_KEY:-${CDN_SSH_KEY:-}}" ]]; then
-    keyfile="$(mktemp)"
-    printf '%s\n' "${COMPOSE_SSH_KEY:-$CDN_SSH_KEY}" >"$keyfile"
-    chmod 600 "$keyfile"
-    ssh+=(-i "$keyfile")
-    trap 'rm -f "$keyfile"' EXIT
-  fi
   case "$cmd" in
-    deploy)
-      app="$1"; tag="${2:-}"
-      svc="$app"
-      if [[ -n "$tag" ]]; then
-        "${ssh[@]}" "${user}@${host}" "cd $remote && export IMAGE_TAG=$(printf %q "$tag") && docker compose pull $svc && docker compose up -d $svc"
-      else
-        "${ssh[@]}" "${user}@${host}" "cd $remote && docker compose pull $svc && docker compose up -d $svc"
-      fi
+    deploy) compose_deploy "$1" "${2:-}" ;;
+    image)
+      app="$1"; tag="$2"
+      key="$(compose_tag_env "$app")"
+      remote_q="$(printf %q "$REMOTE_DIR")"
+      key_q="$(printf %q "$key")"
+      tag_q="$(printf %q "$tag")"
+      compose_ssh "bash -s" <<EOF
+set -euo pipefail
+cd $remote_q
+touch .env
+if grep -qE '^'"$key_q"'=' .env; then
+  sed -i.bak -E 's|^'"$key_q"'=.*|'"$key_q"'='"$tag_q"'|' .env
+  rm -f .env.bak
+else
+  printf '%s=%s\n' $key_q $tag_q >> .env
+fi
+EOF
       ;;
-    *) echo "deployctl compose-ssh: $cmd not supported" >&2; exit 2 ;;
+    env) echo "deployctl compose-ssh: env is a no-op" >&2 ;;
+    get-image) compose_get_image "$1" ;;
+    get-env)
+      key="$2"
+      remote_q="$(printf %q "$REMOTE_DIR")"
+      key_q="$(printf %q "$key")"
+      compose_ssh "bash -s" <<EOF
+set -euo pipefail
+cd $remote_q
+grep -E '^'"$key_q"'=' .env 2>/dev/null | head -1 | cut -d= -f2- || true
+EOF
+      ;;
+    *) echo "deployctl compose-ssh: unknown cmd $cmd" >&2; exit 2 ;;
   esac
   exit 0
 fi
 
+# ---- coolify (legacy) ----
 case "$cmd" in
   deploy)
     app="$1"; tag="${2:-}"; name="${3:-}"
@@ -86,10 +193,9 @@ case "$cmd" in
     else coolify image "$uuid" "$tag"; fi
     ;;
   env)
-    app="$1"; key="$2"; value="$3"
-    uuid="$(app_uuid "$app")"
-    [[ -n "$uuid" ]] || { echo "deployctl: set Coolify UUID for $app" >&2; exit 1; }
-    coolify env "$uuid" "$key" "$value"
+    uuid="$(app_uuid "$1")"
+    [[ -n "$uuid" ]] || { echo "deployctl: set Coolify UUID for $1" >&2; exit 1; }
+    coolify env "$uuid" "$2" "$3"
     ;;
   get-image)
     uuid="$(app_uuid "$1")"
