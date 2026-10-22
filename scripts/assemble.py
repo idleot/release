@@ -293,10 +293,11 @@ def main() -> int:
         wrev = wmeta.get("revision") or release.get("revision") or ""
         if wrev and (out / "client" / wrev / "wasm" / "tibia.js").is_file():
             web = release["targets"].setdefault("web", {})
-            web.setdefault("engine", wrev)
+            # Always pin engine to the wasm slice revision — setdefault kept a
+            # stale previous engine and finish_v3 then rewrote wasm → missing tip.
+            web["engine"] = wrev
             web["wasm"] = f"client/{wrev}/wasm"
-            if not release.get("revision"):
-                release["revision"] = wrev
+            release["revision"] = wrev
     if desktop and (desktop / "installers").is_dir():
         # Qt CIP launcher archives from package_launcher.py (overwrites previous).
         shutil.rmtree(out / "installers", ignore_errors=True)
@@ -411,6 +412,24 @@ def main() -> int:
                     continue  # produced by emit_cip itself
                 extra.append(path)
     emit_cip(out, cdn_url, str(launcher_version), extra)
+
+    # Gate /play tips: empty package.json stubs must never ship.
+    web = release["targets"].get("web") or {}
+    lw = out / "launcher" / "launcher-web-current" / "launcher.wasm"
+    tw = out / "launcher" / "tibiaclient-web-current" / "tibia.wasm"
+    things_rel = web.get("things")
+    things_path = out / things_rel if things_rel else None
+    if not lw.is_file() or not tw.is_file():
+        raise SystemExit(
+            f"[assemble] refusing empty web tip "
+            f"(launcher.wasm={lw.is_file()} tibia.wasm={tw.is_file()} "
+            f"web={web!r}) — check wasm engine pin"
+        )
+    if not things_rel or not things_path or not things_path.is_file():
+        raise SystemExit(
+            f"[assemble] refusing release without web.things list "
+            f"(things={things_rel!r}) — /play Update needs content-things.json"
+        )
 
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     print(f"[assemble] bundle {total / 1e6:.1f} MB → {out}")

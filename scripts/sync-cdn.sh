@@ -164,8 +164,14 @@ push_blobs() {
           replace_tree "launcher/assets-current"
         fi
       elif [[ -d "$child" && "$name" == *-current ]]; then
-        # launcher-web-current, tibiaclient-*-current, etc.
-        replace_tree "launcher/${name}"
+        # Never overwrite a live tip with an empty stub (package.json only).
+        if ! compgen -G "${child}/*.wasm" >/dev/null \
+          && ! compgen -G "${child}/tibia.js" >/dev/null \
+          && ! compgen -G "${child}/launcher.js" >/dev/null; then
+          echo "[sync-cdn] skip empty tip launcher/${name} (no wasm/js) — leave host alone"
+        else
+          replace_tree "launcher/${name}"
+        fi
       elif [[ -d "$child" ]]; then
         remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher/${name}'"
         rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
@@ -232,6 +238,20 @@ fi
 EOF
 
   replace_tree latest
+  # If assemble omitted things-* (manifests-only previous), pull host copies
+  # into the site tree so --delete does not wipe /play sprite lists.
+  if [[ -d "${site}/releases" ]]; then
+    remote "ls -d ${CDN_REMOTE_ROOT}/html/releases/things-* 2>/dev/null || true" | while read -r d; do
+      [[ -n "$d" ]] || continue
+      name="$(basename "$d")"
+      if [[ ! -d "${site}/releases/${name}" ]]; then
+        echo "[sync-cdn] merge host releases/${name} into site before flip"
+        mkdir -p "${site}/releases/${name}"
+        rsync -a -e "$RSYNC_SSH" \
+          "${CDN_SSH_USER}@${CDN_SSH_HOST}:${d}/" "${site}/releases/${name}/"
+      fi
+    done
+  fi
   replace_tree releases
 
   for f in healthz hints.json; do
