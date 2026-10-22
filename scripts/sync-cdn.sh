@@ -138,7 +138,13 @@ push_blobs() {
       [[ -e "$child" ]] || continue
       name="$(basename "$child")"
       if [[ "$name" == "assets-current" ]]; then
-        replace_tree "launcher/assets-current"
+        # Reuse marker = stamps only in the assemble tree; host already has the
+        # packed sprites. Never --delete-replace from a stamp-only tree.
+        if [[ -f "${site}/.idleot/reuse-assets" ]]; then
+          echo "[sync-cdn] assets-current unchanged — leave host tip alone"
+        else
+          replace_tree "launcher/assets-current"
+        fi
       elif [[ -d "$child" ]]; then
         remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher/${name}'"
         rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \

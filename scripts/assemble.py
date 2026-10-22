@@ -291,9 +291,9 @@ def main() -> int:
     things = next((t["things"] for t in prev_release.get("targets", {}).values() if t.get("things")), None)
     if assets:
         # The assets slice is authoritative for assets/ (store/outfits/items) and
-        # usually for content-things. When assetsRevision matches the previous tip
-        # and launcher/assets-current was pulled from the host, reuse the CIP tip
-        # and skip re-importing/re-lzma'ing multi-GB sprites.
+        # usually for content-things. When assetsRevision matches the previous tip,
+        # keep host launcher/assets-current in place (CI only pulls stamp JSON) and
+        # skip re-lzma of multi-GB sprites.
         shutil.rmtree(out / "assets", ignore_errors=True)
         copy_tree(assets / "assets", out / "assets")
         new_assets = load_json(assets / ".idleot" / "assets.json") or {}
@@ -311,12 +311,18 @@ def main() -> int:
             and prev_tip is not None
             and prev_tip.is_file()
         ):
-            print(f"[assemble] assets tip unchanged ({new_assets_rev}) — reuse assets-current")
-            copy_tree(previous / "launcher" / "assets-current", out / "launcher" / "assets-current")
+            print(f"[assemble] assets tip unchanged ({new_assets_rev}) — reuse host assets-current")
+            # Stamps only (assets.json*) — sprites stay on the CDN host volume.
+            dest = out / "launcher" / "assets-current"
+            dest.mkdir(parents=True, exist_ok=True)
+            for name in ("assets.json", "assets-macos.json", "assets.json.sha256"):
+                src = previous / "launcher" / "assets-current" / name
+                if src.is_file():
+                    shutil.copy2(src, dest / name)
             if things and (previous / things).is_file():
-                dest = out / things
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(previous / things, dest)
+                tdest = out / things
+                tdest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(previous / things, tdest)
             (out / ".idleot").mkdir(parents=True, exist_ok=True)
             (out / ".idleot" / "reuse-assets").write_text(new_assets_rev + "\n")
         else:
