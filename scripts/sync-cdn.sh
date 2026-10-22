@@ -177,8 +177,18 @@ push_blobs() {
         rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
           "${child}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/${name}/"
       else
-        rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
-          "$child" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/"
+        # Tip manifests (tibiametadata.json, hints.json, …) must overwrite —
+        # --ignore-existing left Soft directoryname stuck on the prior tip.
+        case "$name" in
+          tibiametadata.json|hints.json|*.json.version)
+            rsync -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+              "$child" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/"
+            ;;
+          *)
+            rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+              "$child" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/"
+            ;;
+        esac
       fi
     done
   fi
