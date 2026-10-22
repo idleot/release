@@ -156,8 +156,18 @@ def list_missing(out: Path, rel: str) -> int | None:
 def finish_v3(out: Path, release: dict, history: list[str]) -> None:
     """Drop broken targets, prune releases/ and content/, write latest/release.json."""
     targets = release["targets"]
+    # When assets tip is unchanged, CI only pulls stamp JSON + content-things
+    # list — sprite blobs stay on the CDN host volume. Do not treat those
+    # missing workspace blobs as a reason to drop the whole web/desktop target
+    # (that wiped wasm tips and tripped "refusing empty web tip").
+    reuse_assets = (out / ".idleot" / "reuse-assets").is_file()
     for name, target in list(targets.items()):
-        broken = [rel for rel in target_lists(target) if list_missing(out, rel) != 0]
+        broken = []
+        for rel in target_lists(target):
+            if reuse_assets and Path(rel).name == "content-things.json":
+                continue
+            if list_missing(out, rel) != 0:
+                broken.append(rel)
         wasm = target.get("wasm")
         if wasm and not (out / wasm / "tibia.js").is_file():
             broken.append(wasm)
