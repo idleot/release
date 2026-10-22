@@ -48,10 +48,28 @@ setup_ssh() {
 
 remote() { "${SSH[@]}" "$@"; }
 
+# Coolify names dockerimage apps as <uuid>-<timestamp>, not idleot-cdn.
+# Prefer image ghcr.io/idleot/cdn; fall back to name / mount path.
+cdn_container_id_cmd() {
+  cat <<'EOS'
+cid="$(docker ps --format '{{.ID}}\t{{.Names}}\t{{.Image}}' | awk -F'\t' '
+  $3 ~ /(^|\/)cdn(:|$)/ || $3 ~ /idleot\/cdn/ { print $1; exit }
+  $2 ~ /(^|-)idleot-cdn($|-)/ { print $1; exit }
+')"
+if [[ -z "$cid" ]]; then
+  cid="$(docker ps -q | while read -r id; do
+    docker inspect "$id" --format '{{.Id}} {{range .Mounts}}{{println .Source .Destination}}{{end}}' \
+      | awk '$2 ~ /idleot-cdn/ && $3 == "/usr/share/nginx/html" { print substr($1,1,12); exit }'
+  done)"
+fi
+EOS
+}
+
 reload_nginx() {
   remote bash -s <<EOF
-cid="\$(docker ps --format '{{.ID}} {{.Names}}' | awk '/idleot-cdn|cdn/ {print \$1; exit}')"
-if [[ -n "\$cid" ]]; then
+set -euo pipefail
+$(cdn_container_id_cmd)
+if [[ -n "\${cid:-}" ]]; then
   docker exec "\$cid" nginx -s reload 2>/dev/null || true
 fi
 EOF
@@ -66,9 +84,10 @@ verify_cdn() {
 set -euo pipefail
 HTML='${CDN_REMOTE_ROOT}/html'
 REQUIRE_RELEASE='${require_release}'
-cid="\$(docker ps --format '{{.ID}} {{.Names}}' | awk '/idleot-cdn|cdn/ {print \$1; exit}')"
-if [[ -z "\$cid" ]]; then
-  echo "::error::no running idleot-cdn container"
+$(cdn_container_id_cmd)
+if [[ -z "\${cid:-}" ]]; then
+  echo "::error::no running idleot/cdn container (Coolify uuid name or ghcr.io/idleot/cdn)"
+  docker ps --format '{{.Names}} {{.Image}}' || true
   exit 1
 fi
 mount_ok="\$(docker inspect "\$cid" --format '{{range .Mounts}}{{println .Source .Destination}}{{end}}' \
@@ -91,7 +110,7 @@ if [[ "\$REQUIRE_RELEASE" == "1" ]]; then
     exit 1
   fi
 fi
-echo "[sync-cdn] verify ok (mount\${REQUIRE_RELEASE:+ + release.json})"
+echo "[sync-cdn] verify ok (mount\${REQUIRE_RELEASE:+ + release.json}) cid=\$cid"
 EOF
 }
 

@@ -282,12 +282,20 @@ jobs:
             return 1
           }
           live="$(bash scripts/deployctl get-image cdn || true)"
+          skipped_deploy=0
           if [[ "$live" == "$RUNTIME_TAG" || "$live" == "runtime" ]]; then
             echo "[coolify] runtime already ${live} — skip image deploy"
+            skipped_deploy=1
           else
             bash scripts/deployctl deploy cdn "$RUNTIME_TAG"
           fi
           if ! wait_mount; then
+            if [[ "$skipped_deploy" -eq 1 ]]; then
+              # Redeploying a healthy tip is what killed v1.0.62 (Coolify uuid
+              # rename + mount race). Fail loud instead of making it worse.
+              echo "::error::cdn mount verify failed but image is already ${live}; not redeploying"
+              exit 1
+            fi
             echo "::warning::volume mount missing after deploy — restarting once"
             bash scripts/deployctl deploy cdn || true
             wait_mount
