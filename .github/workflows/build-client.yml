@@ -220,7 +220,7 @@ jobs:
     needs: [check]
     if: needs.check.outputs.desktop != 'true'
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - platform: linux-x64
@@ -369,21 +369,33 @@ jobs:
         run: |
           summary() {
             echo "::group::error summary ($1)"
-            grep -nE "FAILED:" "$1" | cut -c1-500 | head -n 20
-            grep -nE "(error C[0-9]|fatal error|error:|LNK[0-9])" "$1" | cut -c1-500 | head -n 30
+            grep -nE "FAILED:|CMake Error|error:|fatal error|error C[0-9]|LNK[0-9]|vcpkg" "$1" \
+              | grep -vE "^[[:space:]]*(-|#)" | cut -c1-500 | head -n 80 || true
+            echo "---- tail ----"
+            tail -n 80 "$1" || true
             echo "::endgroup::"
           }
           # Force ccache on every desktop platform (presets agree: OPTIONS_ENABLE_CCACHE).
           # CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded (/Z7) for ccache on MSVC.
           [[ -n "${VCPKG_ROOT:-}" ]] || { echo "::error::VCPKG_ROOT unset"; exit 1; }
-          args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
-                -DOPTIONS_ENABLE_CCACHE=ON -DOPTIONS_ENABLE_SCCACHE=OFF
-                -DCMAKE_PREFIX_PATH="$QT_PREFIX")
+          test -f "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" || {
+            echo "::error::missing $VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"; exit 1
+          }
+          # Point binary cache at the GHA cache dir (presets otherwise use ../../.cache).
+          export VCPKG_DEFAULT_BINARY_CACHE="${VCPKG_DEFAULT_BINARY_CACHE:-$RUNNER_TEMP/vcpkg-binary-cache}"
+          export VCPKG_BINARY_SOURCES="${VCPKG_BINARY_SOURCES:-clear;files,$VCPKG_DEFAULT_BINARY_CACHE,readwrite}"
+          args=(
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+            -DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
+            -DOPTIONS_ENABLE_CCACHE=ON -DOPTIONS_ENABLE_SCCACHE=OFF
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX"
+          )
           if [[ "$RUNNER_OS" == Windows ]]; then
             args+=(-DBUILD_STATIC_LIBRARY=OFF
                    -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
                    -DVCPKG_TARGET_TRIPLET=x64-windows-static-md)
             export PATH="/c/ProgramData/chocolatey/bin:$PATH"
+            export VCPKG_TARGET_TRIPLET=x64-windows-static-md
           elif [[ "$RUNNER_OS" == macOS ]]; then
             args+=(-DVCPKG_TARGET_TRIPLET=arm64-osx-static)
             export VCPKG_TARGET_TRIPLET=arm64-osx-static
@@ -391,12 +403,13 @@ jobs:
             args+=(-DVCPKG_TARGET_TRIPLET=x64-linux-static)
             export VCPKG_TARGET_TRIPLET=x64-linux-static
           fi
+          echo "cmake --preset ${{ matrix.preset }} toolchain=$VCPKG_ROOT triplet=$VCPKG_TARGET_TRIPLET"
           if ! cmake --preset "${{ matrix.preset }}" "${args[@]}" > "$RUNNER_TEMP/configure.log" 2>&1; then
             summary "$RUNNER_TEMP/configure.log"
             {
               echo "### Configure failed (${{ matrix.platform }})"
               echo '```'
-              tail -n 50 "$RUNNER_TEMP/configure.log"
+              tail -n 80 "$RUNNER_TEMP/configure.log"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
