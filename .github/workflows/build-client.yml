@@ -138,6 +138,7 @@ jobs:
           restore-keys: |
             vcpkg-wasm-${{ hashFiles('vcpkg.json') }}-
             vcpkg-wasm-
+          save-always: true
 
       - name: Setup vcpkg
         run: |
@@ -149,22 +150,26 @@ jobs:
         run: bash tools/qt/install-qt.sh --wasm
 
       - name: Configure tibia wasm
+        id: wasm_build
         run: |
           summary() {
             echo "::group::error summary ($1)"
-            grep -E "(error|Error|FAILED|CMake Error|vcpkg)" "$1" | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 80
+            # Prefer real failures; exclude vcpkg install chatter that drowned the previous greps.
+            grep -E "(error:|Error:|FAILED:|CMake Error|ninja: build|undefined reference|fatal error)" "$1" \
+              | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 80 || true
+            echo "::endgroup::"
+            echo "::group::log tail ($1)"
+            tail -n 100 "$1"
             echo "::endgroup::"
             {
               echo "### Configure failed (wasm)"
               echo '```'
-              tail -n 40 "$1"
+              tail -n 80 "$1"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           }
           mkdir -p "$CCACHE_DIR"
-          # Configure-only fingerprint: build-tibia.sh configures then builds; split by
-          # running cmake args extraction is heavy — use full script and treat configure
-          # failures via log. Prefer explicit configure when build dir missing.
+          df -h "$RUNNER_TEMP" "$HOME" . || true
           if ! bash deploy/build-tibia.sh --wasm > "$RUNNER_TEMP/wasm-build.log" 2>&1; then
             summary "$RUNNER_TEMP/wasm-build.log"; exit 1
           fi
@@ -186,6 +191,14 @@ jobs:
             echo "::error::tibia.wasm < 5MB — incomplete wasm link"
             exit 1
           fi
+
+      - name: Upload wasm build log on failure
+        if: failure() && steps.wasm_build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-build-log
+          path: ${{ runner.temp }}/wasm-build.log
+          if-no-files-found: ignore
 
       - name: Pack wasm slice
         env:
