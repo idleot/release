@@ -142,11 +142,8 @@ jobs:
       - name: Setup vcpkg
         run: |
           export VCPKG_BINARY_CACHE_DIR="$RUNNER_TEMP/vcpkg-binary-cache"
-          bash deploy/ci-setup-vcpkg.sh
-          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
-          echo "VCPKG_DEFAULT_BINARY_CACHE=$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_ENV"
-          echo "VCPKG_BINARY_SOURCES=$VCPKG_BINARY_SOURCES" >> "$GITHUB_ENV"
-          echo "VCPKG_DOWNLOADS=$VCPKG_DOWNLOADS" >> "$GITHUB_ENV"
+          # shellcheck disable=SC1091
+          source deploy/ci-setup-vcpkg.sh
 
       - name: Install Qt for WebAssembly + emsdk
         run: bash tools/qt/install-qt.sh --wasm
@@ -332,12 +329,8 @@ jobs:
         shell: bash
         run: |
           export VCPKG_BINARY_CACHE_DIR="$RUNNER_TEMP/vcpkg-binary-cache"
-          # Windows: bootstrap via .bat if needed — ci-setup clones + sh bootstrap.
-          bash deploy/ci-setup-vcpkg.sh
-          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
-          echo "VCPKG_DEFAULT_BINARY_CACHE=$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_ENV"
-          echo "VCPKG_BINARY_SOURCES=$VCPKG_BINARY_SOURCES" >> "$GITHUB_ENV"
-          echo "VCPKG_DOWNLOADS=$VCPKG_DOWNLOADS" >> "$GITHUB_ENV"
+          # shellcheck disable=SC1091
+          source deploy/ci-setup-vcpkg.sh
 
       - name: Install Qt
         shell: bash
