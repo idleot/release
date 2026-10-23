@@ -6,12 +6,12 @@
 #
 # This repo is public (free runners), so:
 #   - Compiler output goes to files; logs show only an error summary.
-#   - Opaque caches only: pinned Qt SDK/emsdk + ccache object store (no source).
+#   - Opaque caches only: pinned Qt SDK/emsdk + vcpkg binary cache + ccache (no source).
 #   - Artifacts hold only the content store the CDN publishes anyway.
 #
-# Desktop: tibia (Qt/QML in src/tibia) → image tibia-desktop. Browser: tibia+
-# gamecore under Qt emsdk → image otclient-wasm (name kept for CDN/ACL; contents
-# are tibia.js / tibia.wasm). QML is compiled in; nothing to encrypt.
+# Desktop: tibia (Qt/QML in src/tibia) → image tibia-desktop. Browser: tibia
+# under Qt emsdk → image otclient-wasm (name kept for CDN/ACL; contents are
+# tibia.js / tibia.wasm). C++ deps: vcpkg manifest + binary cache. QML compiled in.
 # Code signing turns on by itself once its secrets exist (unsigned otherwise):
 #   Windows (Azure Trusted Signing): AZURE_TENANT_ID, AZURE_CLIENT_ID,
 #     AZURE_CLIENT_SECRET + vars TRUSTED_SIGNING_ENDPOINT,
@@ -109,7 +109,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ninja-build python3-venv ccache libegl1-mesa-dev libfontconfig1-dev \
-            libxkbcommon-dev gzip brotli >/dev/null
+            libxkbcommon-dev gzip brotli git curl zip unzip tar >/dev/null
           ccache --max-size=3G
           echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
@@ -130,22 +130,54 @@ jobs:
             ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-
             ccache-wasm-
 
+      - name: Cache vcpkg binary (wasm)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
+          restore-keys: |
+            vcpkg-wasm-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-wasm-
+
+      - name: Setup vcpkg
+        run: |
+          export VCPKG_BINARY_CACHE_DIR="$RUNNER_TEMP/vcpkg-binary-cache"
+          bash deploy/ci-setup-vcpkg.sh
+          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_ENV"
+          echo "VCPKG_BINARY_SOURCES=$VCPKG_BINARY_SOURCES" >> "$GITHUB_ENV"
+          echo "VCPKG_DOWNLOADS=$VCPKG_DOWNLOADS" >> "$GITHUB_ENV"
+
       - name: Install Qt for WebAssembly + emsdk
         run: bash tools/qt/install-qt.sh --wasm
 
-      - name: Build tibia wasm
+      - name: Configure tibia wasm
         run: |
           summary() {
             echo "::group::error summary ($1)"
-            grep -E "(error|Error|FAILED|CMake Error)" "$1" | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 60
+            grep -E "(error|Error|FAILED|CMake Error|vcpkg)" "$1" | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 80
             echo "::endgroup::"
+            {
+              echo "### Configure failed (wasm)"
+              echo '```'
+              tail -n 40 "$1"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           }
           mkdir -p "$CCACHE_DIR"
+          # Configure-only fingerprint: build-tibia.sh configures then builds; split by
+          # running cmake args extraction is heavy — use full script and treat configure
+          # failures via log. Prefer explicit configure when build dir missing.
           if ! bash deploy/build-tibia.sh --wasm > "$RUNNER_TEMP/wasm-build.log" 2>&1; then
             summary "$RUNNER_TEMP/wasm-build.log"; exit 1
           fi
           ccache -s || true
           echo "build ok ($(wc -l < "$RUNNER_TEMP/wasm-build.log") lines suppressed)"
+          {
+            echo "### wasm build"
+            echo "- log lines: $(wc -l < "$RUNNER_TEMP/wasm-build.log")"
+            ccache -s 2>/dev/null | head -20 || true
+          } >> "$GITHUB_STEP_SUMMARY"
           NOTES="$(find build/tibia-wasm -name tibia-wasm-size.txt -type f | head -1 || true)"
           [[ -n "$NOTES" ]] || { echo "::error::tibia-wasm-size.txt missing"; exit 1; }
           cat "$NOTES"
@@ -154,7 +186,7 @@ jobs:
           wasm_bytes=$(wc -c < "$WASM" | tr -d ' ')
           echo "tibia.wasm bytes=$wasm_bytes"
           if [[ "$wasm_bytes" -lt 5000000 ]]; then
-            echo "::error::tibia.wasm < 5MB — likely built without gamecore"
+            echo "::error::tibia.wasm < 5MB — incomplete wasm link"
             exit 1
           fi
 
@@ -287,6 +319,26 @@ jobs:
             ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-
             ccache-${{ matrix.platform }}-
 
+      - name: Cache vcpkg binary (desktop)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
+          restore-keys: |
+            vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-${{ matrix.platform }}-
+
+      - name: Setup vcpkg
+        shell: bash
+        run: |
+          export VCPKG_BINARY_CACHE_DIR="$RUNNER_TEMP/vcpkg-binary-cache"
+          # Windows: bootstrap via .bat if needed — ci-setup clones + sh bootstrap.
+          bash deploy/ci-setup-vcpkg.sh
+          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=$VCPKG_DEFAULT_BINARY_CACHE" >> "$GITHUB_ENV"
+          echo "VCPKG_BINARY_SOURCES=$VCPKG_BINARY_SOURCES" >> "$GITHUB_ENV"
+          echo "VCPKG_DOWNLOADS=$VCPKG_DOWNLOADS" >> "$GITHUB_ENV"
+
       - name: Install Qt
         shell: bash
         run: |
@@ -328,21 +380,33 @@ jobs:
             grep -nE "(error C[0-9]|fatal error|error:|LNK[0-9])" "$1" | cut -c1-500 | head -n 30
             echo "::endgroup::"
           }
-          # Force ccache on every desktop platform. Windows preset defaults to sccache,
-          # which is not installed in CI — without this override the Windows ccache
-          # store stayed empty (~184 B) and every run was a cold MSVC compile.
-          # CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded (/Z7): MSVC /Zi PDBs make
-          # ccache report ~0.3% cacheable calls (linux/mac hit ~96% on the same SHA).
+          # Force ccache on every desktop platform (presets agree: OPTIONS_ENABLE_CCACHE).
+          # CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded (/Z7) for ccache on MSVC.
+          [[ -n "${VCPKG_ROOT:-}" ]] || { echo "::error::VCPKG_ROOT unset"; exit 1; }
           args=(-DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
                 -DOPTIONS_ENABLE_CCACHE=ON -DOPTIONS_ENABLE_SCCACHE=OFF
                 -DCMAKE_PREFIX_PATH="$QT_PREFIX")
           if [[ "$RUNNER_OS" == Windows ]]; then
             args+=(-DBUILD_STATIC_LIBRARY=OFF
-                   -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded)
+                   -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+                   -DVCPKG_TARGET_TRIPLET=x64-windows-static-md)
             export PATH="/c/ProgramData/chocolatey/bin:$PATH"
+          elif [[ "$RUNNER_OS" == macOS ]]; then
+            args+=(-DVCPKG_TARGET_TRIPLET=arm64-osx-static)
+            export VCPKG_TARGET_TRIPLET=arm64-osx-static
+          else
+            args+=(-DVCPKG_TARGET_TRIPLET=x64-linux-static)
+            export VCPKG_TARGET_TRIPLET=x64-linux-static
           fi
           if ! cmake --preset "${{ matrix.preset }}" "${args[@]}" > "$RUNNER_TEMP/configure.log" 2>&1; then
-            summary "$RUNNER_TEMP/configure.log"; exit 1
+            summary "$RUNNER_TEMP/configure.log"
+            {
+              echo "### Configure failed (${{ matrix.platform }})"
+              echo '```'
+              tail -n 50 "$RUNNER_TEMP/configure.log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
           if ! grep -qiE "ccache|compiler launcher" "$RUNNER_TEMP/configure.log"; then
             echo "::warning::configure log has no ccache mention — check OPTIONS_ENABLE_CCACHE"

@@ -31,9 +31,9 @@ from pathlib import Path
 
 OTC = Path(__file__).resolve().parents[2] / "otclient"
 
-# Tip packages[].name + directoryname → packages/<name>/ on disk.
-# Soft uses "Tibia" / "Tibia.app"; IdleOT overrides both to this value.
-CLIENT_PACKAGE_DIR = "IdleOT"
+# Tip packages[].directoryname → packages/<name>/ on disk (also used as name).
+# Soft uses name "Tibia" + directoryname "Tibia.app"; IdleOT uses IdleOT.app for both.
+CLIENT_PACKAGE_DIR = "IdleOT.app"
 
 # (os, architecture field, v3 engine target or "web", launcher dir, client dir)
 PLATFORMS = (
@@ -349,7 +349,8 @@ def emit_cip(
         else:
             files.extend(records_from_list(out, client_dir, target.get("files")))
             files.extend(records_from_list(out, client_dir, target.get("content")))
-            exe = executable_of(out, target.get("files"), "tibia")
+            # Soft Play basename is `client` (packages/…/Contents/MacOS/client).
+            exe = executable_of(out, target.get("files"), "client")
         write_package(client_dir, version, exe, files, "second")
         assets_name = "assets-macos.json" if os_name == "macos" else "assets.json"
         packages_builds.append({
