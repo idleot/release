@@ -121,8 +121,9 @@ jobs:
           path: ~/Qt
           key: qt-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}
 
-      - name: Cache ccache (wasm)
-        uses: actions/cache@v4
+      # restore/save split: save-always is deprecated and does not persist on failure.
+      - name: Restore ccache (wasm)
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
           key: ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
@@ -130,15 +131,15 @@ jobs:
             ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-
             ccache-wasm-
 
-      - name: Cache vcpkg binary (wasm)
-        uses: actions/cache@v4
+      - name: Restore vcpkg binary (wasm)
+        id: vcpkg_cache_wasm
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
           key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
           restore-keys: |
             vcpkg-wasm-${{ hashFiles('vcpkg.json') }}-
             vcpkg-wasm-
-          save-always: true
 
       - name: Setup vcpkg
         run: |
@@ -169,15 +170,25 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           }
           mkdir -p "$CCACHE_DIR"
+          ccache --max-size=3G
+          ccache -z
           df -h "$RUNNER_TEMP" "$HOME" . || true
+          echo "::group::cache restore status"
+          echo "vcpkg cache-hit=${{ steps.vcpkg_cache_wasm.outputs.cache-hit }}"
+          echo "vcpkg cache-matched-key=${{ steps.vcpkg_cache_wasm.outputs.cache-matched-key }}"
+          ls -la "$RUNNER_TEMP/vcpkg-binary-cache" 2>/dev/null | head -5 || echo "vcpkg cache dir empty"
+          echo "::endgroup::"
           if ! bash deploy/build-tibia.sh --wasm > "$RUNNER_TEMP/wasm-build.log" 2>&1; then
             summary "$RUNNER_TEMP/wasm-build.log"; exit 1
           fi
-          ccache -s || true
+          echo "::group::ccache stats (wasm)"
+          ccache -sv 2>/dev/null || ccache -s
+          echo "::endgroup::"
           echo "build ok ($(wc -l < "$RUNNER_TEMP/wasm-build.log") lines suppressed)"
           {
             echo "### wasm build"
             echo "- log lines: $(wc -l < "$RUNNER_TEMP/wasm-build.log")"
+            echo "- vcpkg cache-hit: ${{ steps.vcpkg_cache_wasm.outputs.cache-hit }}"
             ccache -s 2>/dev/null | head -20 || true
           } >> "$GITHUB_STEP_SUMMARY"
           NOTES="$(find build/tibia-wasm -name tibia-wasm-size.txt -type f | head -1 || true)"
@@ -200,6 +211,20 @@ jobs:
           path: ${{ runner.temp }}/wasm-build.log
           if-no-files-found: ignore
 
+      # Persist caches even when the build fails (cold vcpkg was burning ~40m each warm).
+      - name: Save ccache (wasm)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
+
+      - name: Save vcpkg binary (wasm)
+        if: always() && steps.vcpkg_cache_wasm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
       - name: Pack wasm slice
         env:
           IDLEOT_ENGINE_SHA: ${{ env.SHA }}
@@ -320,8 +345,8 @@ jobs:
           path: ${{ runner.temp }}/Qt
           key: qt-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}
 
-      - name: Cache ccache (desktop)
-        uses: actions/cache@v4
+      - name: Restore ccache (desktop)
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
           key: ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
@@ -329,8 +354,9 @@ jobs:
             ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-
             ccache-${{ matrix.platform }}-
 
-      - name: Cache vcpkg binary (desktop)
-        uses: actions/cache@v4
+      - name: Restore vcpkg binary (desktop)
+        id: vcpkg_cache_desktop
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
           key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
@@ -474,6 +500,20 @@ jobs:
           path: ${{ runner.temp }}/fail-logs/build.log
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Save ccache (desktop)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
+
+      - name: Save vcpkg binary (desktop)
+        if: always() && steps.vcpkg_cache_desktop.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-binary-cache
+          key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
 
       - name: Deploy Qt runtime
         shell: bash
