@@ -33,7 +33,14 @@ OTC = Path(__file__).resolve().parents[2] / "otclient"
 
 # Tip packages[].directoryname → packages/<name>/ on disk (also used as name).
 # CipSoft uses name "Tibia" + directoryname "Tibia.app"; IdleOT uses IdleOT.app for both.
+# CipSoft tip variants: regular | preview | test | beta (no "local" — local skips launcher).
 CLIENT_PACKAGE_DIR = "IdleOT.app"
+CLIENT_VARIANTS = {
+    "regular": "IdleOT.app",
+    "test": "IdleOTTest.app",  # qa
+    "beta": "IdleOTBeta.app",  # remote development
+    "preview": "IdleOTPreview.app",  # reserved for a future preview world
+}
 
 # (os, architecture field, v3 engine target or "web", launcher dir, client dir)
 PLATFORMS = (
@@ -362,19 +369,40 @@ def emit_cip(
             "assetsversionurl": f"{cdn_url}/launcher/assets-current/assets.json.sha256",
         })
 
+    # IDLEOT_TIP_VARIANT selects which CipSoft variant this CDN tip advertises
+    # as the installable package (production=regular, qa=test, remote-dev=beta).
+    # Builds still point at *-current / assets-current (shared content pool);
+    # directoryname isolates installs under packages/<IdleOT*.app>/.
+    tip_variant = (os.environ.get("IDLEOT_TIP_VARIANT") or "regular").strip().lower()
+    if tip_variant not in CLIENT_VARIANTS:
+        print(f"[assemble] warning: unknown IDLEOT_TIP_VARIANT={tip_variant!r} — using regular")
+        tip_variant = "regular"
+    tip_dir = CLIENT_VARIANTS[tip_variant]
+    packages = [{
+        "name": tip_dir,
+        "variant": tip_variant,
+        "directoryname": tip_dir,
+        "logolinktarget": "https://www.idleot.com/",
+        "installautomatically": True,
+        "builds": packages_builds,
+    }]
+    # Reserved preview stub (CipSoft tip enum) until a preview world ships tips.
+    if tip_variant != "preview":
+        packages.append({
+            "name": CLIENT_VARIANTS["preview"],
+            "variant": "preview",
+            "directoryname": CLIENT_VARIANTS["preview"],
+            "logolinktarget": "https://www.idleot.com/",
+            "installautomatically": False,
+            "builds": [],
+        })
     metadata = {
         "launcher": {"name": "LAUNCHER", "builds": launcher_builds},
-        "packages": [{
-            "name": CLIENT_PACKAGE_DIR,
-            "variant": "regular",
-            "directoryname": CLIENT_PACKAGE_DIR,
-            "logolinktarget": "https://www.idleot.com/",
-            "installautomatically": True,
-            "builds": packages_builds,
-        }],
+        "packages": packages,
         "hints": f"{cdn_url}/hints.json",
     }
     write_json(out / "launcher" / "tibiametadata.json", metadata)
+    print(f"[assemble] tip variant={tip_variant} directoryname={tip_dir}")
     # Prefer release-vendored tips (idleot/release CI has no otclient/ tree), then
     # monorepo apps/otclient/data, then whatever --previous already put in out/.
     release_root = Path(__file__).resolve().parents[1]

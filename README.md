@@ -102,6 +102,7 @@ Targets — `IDLEOT_CDN_TARGETS`: `image` (default), `pages`, or `image,pages`.
 | `CDN_SSH_HOST`, `CDN_SSH_KEY` | `release` env secret | rsync site tree + compose promote |
 | `CDN_SSH_USER` | `release` env secret (optional) | default `root` |
 | `IDLEOT_CDN_URL` | repo / env variable | default `https://static.idleot.com` (never `cdn.idleot.com`) |
+| `IDLEOT_TIP_VARIANT` | assemble env (optional) | CipSoft tip `packages[].variant`: `regular` (prod, default), `test` (qa), `beta` (remote-dev), `preview` (reserved). Sets `directoryname` to `IdleOT{,Test,Beta,Preview}.app` |
 | `IDLEOT_CDN_TARGETS` | repo variable | `image` / `pages` / `image,pages` |
 | `CDN_REMOTE_ROOT` | `release` env variable (optional) | default `/data/idleot-cdn` |
 | `COMPOSE_REMOTE_DIR` | `release` env variable (optional) | default `/opt/idleot/stack` |
@@ -131,7 +132,10 @@ Desktop and browser share one tip protocol (see
 `emit_cip` (during Bundle assemble) writes `tibiametadata.json` for
 `windows` / `macos` / `linux` / `web`. Payloads are lzma-alone, content-addressed
 under `content/<aa>/<sha>`. Version stamps: `package.json.version` and
-`assets.json.sha256`.
+`assets.json.sha256`. Tip channel: set `IDLEOT_TIP_VARIANT` when assembling
+(`regular` / `test` / `beta`); launcher clients set `IDLEOT_VARIANT` (+ optional
+`IDLEOT_CDN_URL` for remote-dev) to install into the matching
+`packages/<directoryname>/`. Local play uses `make client-start` (no tip).
 
 Release path for binaries:
 
