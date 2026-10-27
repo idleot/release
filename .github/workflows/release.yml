@@ -2,7 +2,7 @@
 # Release orchestrator. An idleot/idleot tag (v*) dispatches this with the tag
 # as `ref`; the umbrella's submodule pointers decide what ships.
 #
-#   resolve -> require warm GHCR images (or build_if_missing)
+#   resolve -> build missing GHCR images (default) OR require warm tags
 #           -> bundle site tree + thin CDN runtime (exact slice tags)
 #           -> record live Coolify tags (for rollback)
 #           -> deploy server (when changed), then CDN flip + portal/pages
@@ -12,7 +12,8 @@
 #
 # components: auto | all | client | server | portal | launcher | server+portal | assets
 # skip_build: redeploy existing images only (rollback)
-# build_if_missing: compile on the release path when :<sha> is absent (default false)
+# build_if_missing: compile on the release path when :<sha> is absent (default true;
+#   tag-release always passes true so warm is not a separate step)
 name: Release
 
 run-name: Release ${{ inputs.ref }} (${{ inputs.components }}${{ inputs.skip_build && ', no build' || '' }}${{ inputs.build_if_missing && ', build if missing' || '' }})
@@ -35,7 +36,7 @@ on:
       build_if_missing:
         description: Build client/server/portal when GHCR tags are missing (slow)
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read

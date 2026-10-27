@@ -6,32 +6,30 @@ cost no Actions minutes. Engine source stays in private repos.
 
 ## Cutting a release
 
-**Warm images first**, then tag. The release path does not compile by default.
+**One step:** push submodule pins, then tag. Release builds any missing GHCR
+images (client / server / portal) and promotes.
 
 ```bash
 # After pushing otclient / crystalserver / portal SHAs that will be tagged:
-gh workflow run warm-client.yml -R idleot/release -f otclient_sha=<full-otclient-sha>
-# crystalserver: build-image runs on push to main (or workflow_dispatch)
-# portal: dispatch build-image.yml in idleot/portal
-
 git tag -a v1.4.0 -m "notes [release:all]"   # [release:all] optional
 git push origin v1.4.0
 ```
 
 `idleot/idleot` `tag-release.yml` dispatches **Release** here with `ref=v1.4.0`
-and `build_if_missing=false`. Missing `:<sha>` tags fail fast.
+and `build_if_missing=true`.
 
 ```
-resolve -> require warm GHCR images (or build_if_missing)
+resolve -> build missing GHCR images (client/server/portal)
         -> bundle      (assemble site; push thin nginx runtime; artifact site/)
         -> record-live (compose image tags for rollback)
         -> deploy server (when changed) → CDN tip flip → portal | Pages
         -> :latest = live, GitHub Release on the umbrella tag
 ```
 
-When images are already warm, the flip is assemble + rsync + compose
-switches (typically minutes). Pass `build_if_missing=true` only when you
-intentionally want the release to compile.
+When images are already in GHCR, the build jobs still run if those components
+changed (rebuild). Pass `build_if_missing=false` only for a fail-fast promote
+that requires pre-warmed `:<sha>` tags. Optional `warm-client.yml` can still
+pre-build a client SHA without shipping.
 
 There is **no portal login gate**. Releases match CIP: bounce/restart the game
 world (clients see unreachable / connection-lost), flip
@@ -54,7 +52,7 @@ launcher (`/launcher/tibiametadata.json`).
 - **Manual** — `components` = `all | client | server | portal | launcher |
   server+portal | assets`.
 - **Rollback** — older tag + `skip_build`.
-- **Warm client** — `warm-client.yml` (or release with `build_if_missing`).
+- **Warm client** — optional `warm-client.yml` (tag release builds missing images).
 
 ## Privacy
 

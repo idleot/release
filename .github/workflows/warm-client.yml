@@ -1,6 +1,7 @@
 ---
-# Push otclient-wasm:<sha> and tibia-desktop:<sha> before tagging a release.
-# Dispatch from otclient CI on push, or manually:
+# Optional pre-build of otclient-wasm:<sha> and tibia-desktop:<sha>.
+# Tagging a release already builds missing images (build_if_missing=true).
+# Use this only to warm a SHA without shipping:
 #   gh workflow run warm-client.yml -R idleot/release -f otclient_sha=<full-sha>
 name: Warm client
 

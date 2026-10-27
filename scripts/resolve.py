@@ -159,8 +159,8 @@ def main() -> int:
         "portal": str("portal" in selected).lower(),
         "launcher": str("launcher" in selected).lower(),
         "promote": str(bool(selected & {"client", "launcher"}) or mode == "assets").lower(),
-        # Default: do not compile on the release critical path. Warm workflows
-        # (or build_if_missing=true) must have pushed :<sha> already.
+        # Default (tag-release): build on the release path when images are
+        # missing. Pass build_if_missing=false to require warm :<sha> tags.
         "build": str((not skip_build) and build_if_missing).lower(),
         "require_images": str((not skip_build) and (not build_if_missing)).lower(),
         "is_tag": str(ref in tags).lower(),
