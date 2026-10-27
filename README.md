@@ -138,7 +138,7 @@ under `content/<aa>/<sha>`. Version stamps: `package.json.version` and
 Release path for binaries:
 
 ```text
-warm GHCR → tag → resolve → assemble+emit_cip
+tag → resolve → build missing images → assemble+emit_cip
   → sync-cdn blobs → server bounce (if needed) → sync-cdn flip latest/releases
 ```
 
