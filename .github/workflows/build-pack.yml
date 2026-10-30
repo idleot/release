@@ -1,7 +1,11 @@
 ---
 # Build IdleOT MODULE/SIDE_MODULE packs on **public** runners (free minutes).
 # Private idleot/idleot-client has no pack compile CI — release checks it out
-# with RELEASE_TOKEN after Soft host artifacts exist on GHCR.
+# with RELEASE_TOKEN after qtclient host artifacts exist on GHCR.
+#
+# Compile cache mirrors qtclient host (ci-host.yml): one Actions slot per OS
+# (ccache-pack-linux|macos|windows|wasm), save-always, plus always() artifact.
+# Keys live in this repo — not qtclient host's ccache-host-*.
 name: Build pack
 
 on:
@@ -59,15 +63,21 @@ jobs:
             runner: ubuntu-24.04
             kit: linux-x64
             triplet: x64-linux-static
+            os_slug: linux
           - plat: macos-arm64
             runner: macos-15
             kit: macos-arm64
             triplet: arm64-osx-static
+            os_slug: macos
           - plat: windows-x64
             runner: windows-2022
             kit: windows-x64
             triplet: x64-windows-static-md
+            os_slug: windows
     environment: release
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
     steps:
       - name: Checkout idleot-client pack sources
         uses: actions/checkout@v5
@@ -78,7 +88,7 @@ jobs:
           persist-credentials: false
           submodules: false
 
-      - name: Checkout Soft host tree
+      - name: Checkout qtclient host tree
         uses: actions/checkout@v5
         with:
           repository: ${{ env.QTCLIENT_REPO }}
@@ -91,15 +101,15 @@ jobs:
       - uses: oras-project/setup-oras@v1
       - uses: lukka/get-cmake@v4.3.4
 
-      - name: Login GHCR (oras)
+      # Soft host packages are public. Do NOT oras-login with idleot GITHUB_TOKEN
+      # first — installation tokens 403 cross-org pulls even when the package is public.
+      - name: Wait + pull qtclient host-sdk
         shell: bash
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Wait + pull Soft host-sdk
-        shell: bash
-        run: bash _qtclient/deploy/ci-pull-host-sdk.sh \
-          "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}" \
-          "$RUNNER_TEMP/host-sdk"
+        run: |
+          oras logout ghcr.io 2>/dev/null || true
+          bash _qtclient/deploy/ci-pull-host-sdk.sh \
+            "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}" \
+            "$RUNNER_TEMP/host-sdk"
 
       - name: MSVC environment
         if: runner.os == 'Windows'
@@ -124,7 +134,7 @@ jobs:
           path: ${{ runner.temp }}/Qt
           key: cip-qt-${{ matrix.kit }}-${{ steps.cip.outputs.sha }}
 
-      - name: Soft host bootstrap (deps + vcpkg + CIP Qt)
+      - name: qtclient host bootstrap (deps + vcpkg + CIP Qt)
         shell: bash
         working-directory: _qtclient
         env:
@@ -136,12 +146,30 @@ jobs:
           QT_PULL_WAIT_SECS: '7200'
         run: bash tools/qt/ci-setup.sh --pull-only --with-vcpkg --with-deps
 
+      # Own Actions cache slot (release repo) — same pattern as qtclient host
+      # ccache-host-*, not shared across repos.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-pack-${{ matrix.os_slug }}
+          restore-keys: |
+            ccache-pack-${{ matrix.os_slug }}
+          save-always: true
+
       - name: Build pack MODULE
         shell: bash
         env:
           VCPKG_TARGET_TRIPLET: ${{ matrix.triplet }}
         run: |
           set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            export PATH="$(brew --prefix)/bin:$PATH"
+          fi
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export PATH="/c/ProgramData/chocolatey/bin:/c/tools/zstd:$PATH"
+          fi
           export QTCLIENT_ROOT="$GITHUB_WORKSPACE/_qtclient"
           pack="$(bash deploy/build-pack.sh --qtclient "$QTCLIENT_ROOT" | tail -1)"
           mkdir -p "$RUNNER_TEMP/pack"
@@ -155,6 +183,27 @@ jobs:
           path: ${{ runner.temp }}/pack/idleot
           retention-days: 2
           include-hidden-files: true
+
+      - name: Pack ccache
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          tar -C "$CCACHE_DIR" -cf - . | zstd -T0 -3 -o "ccache-pack-${{ matrix.os_slug }}-${{ github.sha }}.tar.zst"
+
+      - name: Upload ccache artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccache-pack-${{ matrix.os_slug }}-${{ github.sha }}
+          path: ccache-pack-${{ matrix.os_slug }}-${{ github.sha }}.tar.zst
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Login GHCR (oras) for idleot push
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push pack to GHCR (cache for retries)
         shell: bash
@@ -172,6 +221,9 @@ jobs:
     if: inputs.build_wasm
     runs-on: ubuntu-24.04
     environment: release
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
     steps:
       - name: Checkout idleot-client pack sources
         uses: actions/checkout@v5
@@ -182,7 +234,7 @@ jobs:
           persist-credentials: false
           submodules: false
 
-      - name: Checkout Soft host tree
+      - name: Checkout qtclient host tree
         uses: actions/checkout@v5
         with:
           repository: ${{ env.QTCLIENT_REPO }}
@@ -194,13 +246,14 @@ jobs:
 
       - uses: oras-project/setup-oras@v1
       - uses: lukka/get-cmake@v4.3.4
-      - name: Login GHCR (oras)
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Wait + pull Soft host-sdk
-        run: bash _qtclient/deploy/ci-pull-host-sdk.sh \
-          "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}" \
-          "$RUNNER_TEMP/host-sdk"
+      # Soft host packages are public — pull anonymously (see pack-desktop note).
+      - name: Wait + pull qtclient host-sdk
+        run: |
+          oras logout ghcr.io 2>/dev/null || true
+          bash _qtclient/deploy/ci-pull-host-sdk.sh \
+            "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}" \
+            "$RUNNER_TEMP/host-sdk"
 
       - name: Resolve CIP Qt SHA
         id: cip
@@ -218,7 +271,7 @@ jobs:
           path: ${{ runner.temp }}/Qt
           key: cip-qt-wasm_multithread-${{ steps.cip.outputs.sha }}
 
-      - name: Soft host bootstrap (deps + vcpkg + CIP Qt wasm)
+      - name: qtclient host bootstrap (deps + vcpkg + CIP Qt wasm)
         working-directory: _qtclient
         env:
           QT_ROOT: ${{ runner.temp }}/Qt
@@ -227,9 +280,19 @@ jobs:
           QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
         run: bash tools/qt/ci-setup.sh --wasm --with-vcpkg --with-deps
 
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-pack-wasm
+          restore-keys: |
+            ccache-pack-wasm
+          save-always: true
+
       - name: Build SIDE_MODULE pack
         run: |
           set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
           export QTCLIENT_ROOT="$GITHUB_WORKSPACE/_qtclient"
           pack="$(bash deploy/build-pack.sh --wasm --qtclient "$QTCLIENT_ROOT" | tail -1)"
           mkdir -p "$RUNNER_TEMP/pack"
@@ -242,6 +305,25 @@ jobs:
           path: ${{ runner.temp }}/pack/idleot
           retention-days: 2
           include-hidden-files: true
+
+      - name: Pack ccache
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          tar -C "$CCACHE_DIR" -cf - . | zstd -T0 -3 -o "ccache-pack-wasm-${{ github.sha }}.tar.zst"
+
+      - name: Upload ccache artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccache-pack-wasm-${{ github.sha }}
+          path: ccache-pack-wasm-${{ github.sha }}.tar.zst
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Login GHCR (oras) for idleot push
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push pack-wasm to GHCR
         working-directory: ${{ runner.temp }}

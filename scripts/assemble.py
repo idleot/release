@@ -321,6 +321,11 @@ def main() -> int:
         # skip re-lzma of multi-GB sprites.
         shutil.rmtree(out / "assets", ignore_errors=True)
         copy_tree(assets / "assets", out / "assets")
+        # CIP store/payment art lives under /images/… (not only assets/store).
+        if (assets / "images").is_dir():
+            shutil.rmtree(out / "images" / "store", ignore_errors=True)
+            shutil.rmtree(out / "images" / "payment", ignore_errors=True)
+            copy_tree(assets / "images", out / "images")
         new_assets = load_json(assets / ".idleot" / "assets.json") or {}
         sources["assets"] = new_assets or sources["assets"]
         prev_sources = (load_json(previous / "latest" / "sources.json") if previous else None) or {}

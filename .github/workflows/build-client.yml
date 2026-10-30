@@ -1,12 +1,12 @@
 ---
-# Assemble release client slices from Soft host GHCR + IdleOT packs built here.
-# Soft host compiles on public qtclient CI; pack MODULE/SIDE_MODULE compiles on
+# Assemble release client slices from qtclient host GHCR + IdleOT packs built here.
+# qtclient host compiles on public qtclient CI; pack MODULE/SIDE_MODULE compiles on
 # **this public repo** (free minutes) by checking out private idleot-client with
 # RELEASE_TOKEN — never on private idleot-client Actions.
-# Does NOT compile Soft tibia/wasm here.
+# Does NOT compile qtclient tibia/wasm here.
 #
 # Image names kept for CDN/ACL: otclient-wasm (tibia.js/wasm + mods/idleot),
-# tibia-desktop (Soft tip + pack + installers).
+# tibia-desktop (qtclient tip + pack + installers).
 name: Build client
 
 run-name: Assemble client ${{ inputs.qtclient_sha || inputs.otclient_sha }} ${{ inputs.release_id }}
@@ -39,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       qtclient_sha:
-        description: qtclient commit SHA (full); Soft host artifact tag
+        description: qtclient commit SHA (full); qtclient host artifact tag
         required: false
         default: ""
       otclient_sha:
@@ -65,12 +65,12 @@ env:
   QTCLIENT_REPO: qtclient/qtclient
   IDLEOT_CLIENT_REPO: ${{ github.repository_owner }}/idleot-client
   DESKTOP_IMAGE: tibia-desktop
-  # Soft host artifacts published by qtclient ci-host.yml
+  # qtclient host artifacts published by qtclient ci-host.yml
   HOST_OWNER: qtclient
 
 jobs:
   check:
-    name: Wait Soft host artifacts
+    name: Wait qtclient host artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 130
     outputs:
@@ -97,7 +97,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate pins + wait Soft host
+      - name: Validate pins + wait qtclient host
         id: exists
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
@@ -134,7 +134,7 @@ jobs:
 
           echo "revision=$(date -u +%Y%m%d)-${SHA::7}-${IDLEOT_CLIENT_SHA::7}" >> "$GITHUB_OUTPUT"
 
-          # Soft host only (public qtclient CI). Packs build on this public repo.
+          # qtclient host only (public qtclient CI). Packs build on this public repo.
           if [[ "$need_pack" == true ]]; then
             bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${SHA}" 7200 90
             bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" 7200 90
@@ -184,12 +184,6 @@ jobs:
           sparse-checkout-cone-mode: true
 
       - uses: oras-project/setup-oras@v1
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download pack-wasm artifact
         uses: actions/download-artifact@v4
@@ -197,9 +191,11 @@ jobs:
           name: pack-idleot-wasm
           path: ${{ runner.temp }}/pack/idleot
 
-      - name: Pull Soft host-wasm + merge pack
+      # Soft host is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
+      - name: Pull qtclient host-wasm + merge pack
         run: |
           set -euo pipefail
+          oras logout ghcr.io 2>/dev/null || true
           bash scripts/pull-oras-dir.sh \
             "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" "$RUNNER_TEMP/host-wasm"
           pack="$RUNNER_TEMP/pack/idleot"
@@ -224,6 +220,13 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push otclient-wasm:${{ env.SHA }}
         working-directory: ${{ runner.temp }}/slice
@@ -286,12 +289,6 @@ jobs:
           submodules: false
 
       - uses: oras-project/setup-oras@v1
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download pack artifact
         uses: actions/download-artifact@v4
@@ -299,10 +296,12 @@ jobs:
           name: pack-idleot-${{ matrix.platform }}
           path: ${{ runner.temp }}/pack/idleot
 
-      - name: Pull Soft host + merge pack
+      # Soft host is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
+      - name: Pull qtclient host + merge pack
         shell: bash
         run: |
           set -euo pipefail
+          oras logout ghcr.io 2>/dev/null || true
           bash scripts/pull-oras-dir.sh \
             "ghcr.io/${HOST_OWNER}/qtclient-host-${{ matrix.platform }}:${SHA}" \
             "$RUNNER_TEMP/host"
@@ -342,7 +341,7 @@ jobs:
           set -euo pipefail
           app="$(find "$ENGINE_TIP" -maxdepth 2 -name '*.app' -type d | head -1)"
           [[ -n "$app" ]] || { echo "::error::no .app in $ENGINE_TIP"; exit 1; }
-          # Rename stock Soft brand → IdleOT.app for Gatekeeper / tip layout.
+          # Rename stock qtclient brand → IdleOT.app for Gatekeeper / tip layout.
           dest="$(dirname "$app")/IdleOT.app"
           if [[ "$app" != "$dest" ]]; then
             rm -rf "$dest"
@@ -415,9 +414,11 @@ jobs:
           IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
           TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
+          # Login paths come from mods/idleot urls (build-pack stamps loginBase from SITE_URL).
+          QTCLIENT_LOGIN_PROFILE: mod
         run: |
           set -euo pipefail
-          extra=(--engine-files)
+          extra=(--engine-files --login-profile mod)
           [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--content-files)
           if [[ "${{ matrix.platform }}" == macos-arm64 ]]; then
             extra+=(--engine-app "${ENGINE_APP}")
