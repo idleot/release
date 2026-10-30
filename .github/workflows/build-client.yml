@@ -200,14 +200,14 @@ jobs:
             "ghcr.io/${HOST_OWNER}/client-wasm:${SHA}" "$RUNNER_TEMP/client-wasm"
           pack="$RUNNER_TEMP/pack/idleot"
           test -f "$pack/mod.json"
-          bash _qtclient/deploy/merge-pack-into-tip.sh \
+          bash _qtclient/scripts/deploy/merge-pack-into-tip.sh \
             --pack "$pack" --tip "$RUNNER_TEMP/client-wasm" --platform wasm
           mkdir -p "$RUNNER_TEMP/slice"
           if [[ -d "$RUNNER_TEMP/client-wasm/client" ]]; then
             cp -a "$RUNNER_TEMP/client-wasm/." "$RUNNER_TEMP/slice/"
           else
-            bash _qtclient/deploy/pack-tibia-wasm.sh "$RUNNER_TEMP/client-wasm" "$RUNNER_TEMP/slice"
-            bash _qtclient/deploy/merge-pack-into-tip.sh \
+            bash _qtclient/scripts/deploy/pack-tibia-wasm.sh "$RUNNER_TEMP/client-wasm" "$RUNNER_TEMP/slice"
+            bash _qtclient/scripts/deploy/merge-pack-into-tip.sh \
               --pack "$pack" --tip "$RUNNER_TEMP/slice" --platform wasm
           fi
           mkdir -p "$RUNNER_TEMP/slice/.idleot"
@@ -314,7 +314,7 @@ jobs:
           cp -a _idleot-client/launcher _qtclient/launcher/mods/idleot
           tip="$RUNNER_TEMP/client/engine"
           [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
-          bash _qtclient/deploy/merge-pack-into-tip.sh \
+          bash _qtclient/scripts/deploy/merge-pack-into-tip.sh \
             --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
           echo "ENGINE_TIP=$tip" >> "$GITHUB_ENV"
 

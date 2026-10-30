@@ -107,7 +107,7 @@ jobs:
         shell: bash
         run: |
           oras logout ghcr.io 2>/dev/null || true
-          bash _qtclient/deploy/ci-pull-client-sdk.sh \
+          bash _qtclient/scripts/ci/pull-client-sdk.sh \
             "ghcr.io/${HOST_OWNER}/client-sdk:${{ inputs.qtclient_sha }}" \
             "$RUNNER_TEMP/client-sdk"
 
@@ -261,7 +261,7 @@ jobs:
       - name: Wait + pull qtclient client-sdk
         run: |
           oras logout ghcr.io 2>/dev/null || true
-          bash _qtclient/deploy/ci-pull-client-sdk.sh \
+          bash _qtclient/scripts/ci/pull-client-sdk.sh \
             "ghcr.io/${HOST_OWNER}/client-sdk:${{ inputs.qtclient_sha }}" \
             "$RUNNER_TEMP/client-sdk"
 
