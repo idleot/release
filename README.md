@@ -32,7 +32,7 @@ When images are already in GHCR, assemble skips. Client path:
    (`client-sdk` / `client-wasm` / `client-<plat>:<sha>`).
 2. **Build IdleOT packs on this public repo** (`build-pack.yml`) — checks out
    private `idleot-client` with `RELEASE_TOKEN` and runs
-   `scripts/lifecycle/package/entrypoint.sh --client-sdk` (no private Actions minutes).
+   `scripts/lifecycle/package/module.sh --client-sdk` (no private Actions minutes).
 3. **Assemble** tip (merge `mods/idleot`, IdleOT brand) → GHCR slices.
 
 qtclient tibia/wasm is never compiled here.
