@@ -2,17 +2,27 @@
 # Optional pre-build of otclient-wasm:<sha> and tibia-desktop:<sha>.
 # Tagging a release already builds missing images (build_if_missing=true).
 # Use this only to warm a SHA without shipping:
-#   gh workflow run warm-client.yml -R idleot/release -f otclient_sha=<full-sha>
+#   gh workflow run warm-client.yml -R idleot/release \
+#     -f qtclient_sha=<full-sha> -f idleot_client_sha=<full-sha>
 name: Warm client
 
-run-name: Warm client ${{ inputs.otclient_sha }}
+run-name: Warm client ${{ inputs.qtclient_sha || inputs.otclient_sha }}
 
 on:
   workflow_dispatch:
     inputs:
+      qtclient_sha:
+        description: qtclient/qtclient commit SHA (full 40 chars)
+        required: false
+        default: ""
       otclient_sha:
-        description: idleot/otclient commit SHA (full 40 chars)
-        required: true
+        description: Compat alias for qtclient_sha
+        required: false
+        default: ""
+      idleot_client_sha:
+        description: idleot/idleot-client pack SHA (full); stages mods/idleot
+        required: false
+        default: ""
   repository_dispatch:
     types: [warm-client]
 
@@ -26,5 +36,6 @@ jobs:
     uses: ./.github/workflows/build-client.yml
     secrets: inherit
     with:
-      otclient_sha: ${{ inputs.otclient_sha || github.event.client_payload.otclient_sha }}
+      qtclient_sha: ${{ inputs.qtclient_sha || inputs.otclient_sha || github.event.client_payload.qtclient_sha || github.event.client_payload.otclient_sha }}
+      idleot_client_sha: ${{ inputs.idleot_client_sha || github.event.client_payload.idleot_client_sha || '' }}
       release_id: warm-${{ github.run_id }}

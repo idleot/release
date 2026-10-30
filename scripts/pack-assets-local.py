@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack CIP assets-current + content/ from a local assets slice (no full assemble).
 
-Use after `make extract` + `make -C apps/otclient publish-assets ARGS=things` (or
+Use after `make extract` + `make -C apps/qtclient publish-assets ARGS=things` (or
 this script's --publish). Then push with:
 
   CDN_SSH_HOST=… CDN_SSH_KEY=… bash apps/release/scripts/sync-cdn.sh blobs <site>
@@ -20,7 +20,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-OTC = ROOT / "apps" / "otclient"
+OTC = ROOT / "apps" / "qtclient"
 sys.path.insert(0, str(HERE))
 from cip_package import emit_cip, load_json, write_json  # noqa: E402
 

@@ -1,8 +1,10 @@
 ---
 # Build the release clients (browser WASM + desktop Linux/Windows/macOS) from
-# private idleot/otclient at a pinned SHA and push them as private, files-only
-# slice images tagged :<sha>. Nothing is promoted here — release.yml hands the
-# tags to bundle.yml after the server is live.
+# public/private qtclient (stock host) + idleot/idleot-client (product pack) at
+# pinned SHAs and push them as private, files-only slice images tagged :<sha>.
+# Nothing is promoted here — release.yml hands the tags to bundle.yml after
+# the server is live.
+# Image name otclient-wasm is kept for CDN/ACL (contents = tibia.js/wasm + pack).
 #
 # This repo is public (free runners), so:
 #   - Compiler output goes to files; logs show only an error summary.
@@ -21,14 +23,25 @@
 #     APPLE_APP_PASSWORD
 name: Build client
 
-run-name: Build client ${{ inputs.otclient_sha }} ${{ inputs.release_id }}
+run-name: Build client ${{ inputs.qtclient_sha || inputs.otclient_sha }} ${{ inputs.release_id }}
 
 on:
   workflow_call:
     inputs:
+      qtclient_sha:
+        type: string
+        required: false
+        default: ""
       otclient_sha:
         type: string
-        required: true
+        required: false
+        default: ""
+        description: Compat alias for qtclient_sha (one release)
+      idleot_client_sha:
+        type: string
+        required: false
+        default: ""
+        description: idleot/idleot-client pack SHA (optional; tip stages mods/idleot)
       release_id:
         type: string
         default: ""
@@ -39,9 +52,18 @@ on:
         value: ${{ jobs.check.outputs.desktop_image }}
   workflow_dispatch:
     inputs:
+      qtclient_sha:
+        description: qtclient commit SHA (full); stock host
+        required: false
+        default: ""
       otclient_sha:
-        description: idleot/otclient commit SHA (full)
-        required: true
+        description: Compat alias for qtclient_sha
+        required: false
+        default: ""
+      idleot_client_sha:
+        description: idleot/idleot-client pack SHA (full)
+        required: false
+        default: ""
       release_id:
         description: Correlation id (set by release.yml)
         default: ""
@@ -52,7 +74,11 @@ permissions:
 
 env:
   REGISTRY: ghcr.io/${{ github.repository_owner }}
-  SHA: ${{ inputs.otclient_sha }}
+  SHA: ${{ inputs.qtclient_sha || inputs.otclient_sha }}
+  IDLEOT_CLIENT_SHA: ${{ inputs.idleot_client_sha }}
+  # Stock host is the public CIP-clone; product pack is idleot/idleot-client.
+  QTCLIENT_REPO: qtclient/qtclient
+  IDLEOT_CLIENT_REPO: ${{ github.repository_owner }}/idleot-client
   DESKTOP_IMAGE: tibia-desktop
 
 jobs:
@@ -76,18 +102,30 @@ jobs:
       - name: Look up :sha tags
         id: exists
         run: |
-          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::otclient_sha must be a full commit SHA"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::qtclient_sha (or otclient_sha alias) must be a full commit SHA"; exit 1; }
           echo "desktop_image=$DESKTOP_IMAGE" >> "$GITHUB_OUTPUT"
+          # Pack is compiled into the host MODULE at configure time. A :<qtclient_sha>
+          # tag may be stock-only or an older pack — force rebuild when pack is pinned.
+          force_rebuild=false
+          if [[ -n "${IDLEOT_CLIENT_SHA}" ]]; then
+            [[ "$IDLEOT_CLIENT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::idleot_client_sha must be a full commit SHA when set"; exit 1
+            }
+            force_rebuild=true
+            echo "idleot-client pack pinned (${IDLEOT_CLIENT_SHA::7}) — rebuilding slices"
+          fi
           for slice in wasm desktop; do
             image="otclient-wasm"
             [[ "$slice" == desktop ]] && image="$DESKTOP_IMAGE"
-            if docker buildx imagetools inspect "$REGISTRY/$image:$SHA" >/dev/null 2>&1; then
+            if [[ "$force_rebuild" != true ]] && docker buildx imagetools inspect "$REGISTRY/$image:$SHA" >/dev/null 2>&1; then
               echo "$slice=true" >> "$GITHUB_OUTPUT"; echo "$image:$SHA exists — skipping"
             else
               echo "$slice=false" >> "$GITHUB_OUTPUT"
             fi
           done
-          echo "revision=$(date -u +%Y%m%d)-${SHA::7}" >> "$GITHUB_OUTPUT"
+          pack_rev=""
+          [[ -n "${IDLEOT_CLIENT_SHA}" ]] && pack_rev="-${IDLEOT_CLIENT_SHA::7}"
+          echo "revision=$(date -u +%Y%m%d)-${SHA::7}${pack_rev}" >> "$GITHUB_OUTPUT"
 
   wasm:
     name: WASM
@@ -97,38 +135,71 @@ jobs:
     timeout-minutes: 180
     environment: release
     steps:
-      - name: Checkout otclient
+      - name: Checkout qtclient
         uses: actions/checkout@v5
         with:
-          repository: ${{ github.repository_owner }}/otclient
+          repository: ${{ env.QTCLIENT_REPO }}
           ref: ${{ env.SHA }}
           token: ${{ secrets.RELEASE_TOKEN }}
           persist-credentials: false
+          submodules: false
+
+      - name: Checkout idleot-client pack
+        if: env.IDLEOT_CLIENT_SHA != ''
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.IDLEOT_CLIENT_REPO }}
+          ref: ${{ env.IDLEOT_CLIENT_SHA }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          path: _idleot-client
+          persist-credentials: false
+          submodules: false
+
+      - name: Stage IdleOT pack into qtclient mods/
+        if: env.IDLEOT_CLIENT_SHA != ''
+        run: |
+          set -euo pipefail
+          mkdir -p client/mods launcher/mods
+          rm -rf client/mods/idleot launcher/mods/idleot
+          cp -a _idleot-client/client client/mods/idleot
+          cp -a _idleot-client/launcher launcher/mods/idleot
+          test -f client/mods/idleot/mod.json
+          test -f client/mods/idleot/qml/idleot/qmldir
+
+      - name: Resolve CIP Qt SHA
+        id: cip
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD:third_party/qt5-cip)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ninja-build python3-venv ccache libegl1-mesa-dev libfontconfig1-dev \
-            libxkbcommon-dev gzip brotli git curl zip unzip tar >/dev/null
+            libxkbcommon-dev gzip brotli git curl zip unzip tar zstd >/dev/null
           ccache --max-size=3G
           echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
           echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
 
-      - name: Cache Qt
+      - uses: oras-project/setup-oras@v1
+
+      - name: Cache Qt (CIP wasm)
         uses: actions/cache@v4
         with:
-          path: ~/Qt
-          key: qt-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}
+          path: ${{ runner.temp }}/Qt
+          key: cip-qt-wasm_multithread-${{ steps.cip.outputs.sha }}
 
       # restore/save split: save-always is deprecated and does not persist on failure.
       - name: Restore ccache (wasm)
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
+          key: ccache-wasm-${{ steps.cip.outputs.sha }}-${{ github.sha }}
           restore-keys: |
-            ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-
+            ccache-wasm-${{ steps.cip.outputs.sha }}-
             ccache-wasm-
 
       - name: Restore vcpkg binary (wasm)
@@ -136,7 +207,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
+          key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**') }}-${{ steps.cip.outputs.sha }}
           restore-keys: |
             vcpkg-wasm-${{ hashFiles('vcpkg.json') }}-
             vcpkg-wasm-
@@ -147,8 +218,11 @@ jobs:
           # shellcheck disable=SC1091
           source deploy/ci-setup-vcpkg.sh
 
-      - name: Install Qt for WebAssembly + emsdk
-        run: bash tools/qt/install-qt.sh --wasm
+      - name: Install CIP Qt for WebAssembly + emsdk
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash tools/qt/ci-setup-qt.sh --wasm
 
       - name: Configure tibia wasm
         id: wasm_build
@@ -217,14 +291,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-wasm-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
+          key: ccache-wasm-${{ steps.cip.outputs.sha }}-${{ github.sha }}
 
       - name: Save vcpkg binary (wasm)
         if: always() && steps.vcpkg_cache_wasm.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
+          key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**') }}-${{ steps.cip.outputs.sha }}
       - name: Pack wasm slice
         env:
           IDLEOT_ENGINE_SHA: ${{ env.SHA }}
@@ -286,13 +360,46 @@ jobs:
       WINDOWS_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
       MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
     steps:
-      - name: Checkout otclient
+      - name: Checkout qtclient
         uses: actions/checkout@v5
         with:
-          repository: ${{ github.repository_owner }}/otclient
+          repository: ${{ env.QTCLIENT_REPO }}
           ref: ${{ env.SHA }}
           token: ${{ secrets.RELEASE_TOKEN }}
           persist-credentials: false
+          submodules: false
+
+      - name: Checkout idleot-client pack
+        if: env.IDLEOT_CLIENT_SHA != ''
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.IDLEOT_CLIENT_REPO }}
+          ref: ${{ env.IDLEOT_CLIENT_SHA }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          path: _idleot-client
+          persist-credentials: false
+          submodules: false
+
+      - name: Stage IdleOT pack into qtclient mods/
+        if: env.IDLEOT_CLIENT_SHA != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p client/mods launcher/mods
+          rm -rf client/mods/idleot launcher/mods/idleot
+          cp -a _idleot-client/client client/mods/idleot
+          cp -a _idleot-client/launcher launcher/mods/idleot
+          test -f client/mods/idleot/mod.json
+          test -f client/mods/idleot/qml/idleot/qmldir
+
+      - name: Resolve CIP Qt SHA
+        id: cip
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD:third_party/qt5-cip)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -339,19 +446,21 @@ jobs:
           ccache --version
           ccache --max-size=4G
 
-      - name: Restore Qt
+      - uses: oras-project/setup-oras@v1
+
+      - name: Restore Qt (CIP)
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/Qt
-          key: qt-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}
+          key: cip-qt-${{ matrix.platform }}-${{ steps.cip.outputs.sha }}
 
       - name: Restore ccache (desktop)
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
+          key: ccache-${{ matrix.platform }}-${{ steps.cip.outputs.sha }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-
+            ccache-${{ matrix.platform }}-${{ steps.cip.outputs.sha }}-
             ccache-${{ matrix.platform }}-
 
       - name: Restore vcpkg binary (desktop)
@@ -359,7 +468,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
+          key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**') }}-${{ steps.cip.outputs.sha }}
           restore-keys: |
             vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json') }}-
             vcpkg-${{ matrix.platform }}-
@@ -371,18 +480,19 @@ jobs:
           # shellcheck disable=SC1091
           source deploy/ci-setup-vcpkg.sh
 
-      - name: Install Qt
+      - name: Install CIP Qt
         shell: bash
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          export QT_ROOT="$RUNNER_TEMP/Qt"
-          if ! bash tools/qt/install-qt.sh > "$RUNNER_TEMP/qt.log" 2>&1; then
-            tail -n 20 "$RUNNER_TEMP/qt.log"; exit 1
+          if ! bash tools/qt/ci-setup-qt.sh > "$RUNNER_TEMP/qt.log" 2>&1; then
+            tail -n 40 "$RUNNER_TEMP/qt.log"; exit 1
           fi
           prefix="$(bash tools/qt/qt-prefix.sh)"
           [[ -n "$prefix" ]] || { echo "::error::Qt install finished but tools/qt/qt-prefix.sh finds no Qt"; exit 1; }
           echo "QT_PREFIX=$prefix" >> "$GITHUB_ENV"
           mkdir -p "${CCACHE_DIR:-$RUNNER_TEMP/ccache}"
-          # Zero stats after restore so the post-build summary shows this run's hit rate.
           if command -v ccache >/dev/null; then
             ccache --max-size=4G
             ccache -z
@@ -425,7 +535,7 @@ jobs:
           export VCPKG_BINARY_SOURCES="${VCPKG_BINARY_SOURCES:-clear;files,$VCPKG_DEFAULT_BINARY_CACHE,readwrite}"
           args=(
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-            -DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DOTCLIENT_BUILD_TESTS=OFF
+            -DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DTIBIA_BUILD_TESTS=OFF
             -DOPTIONS_ENABLE_CCACHE=ON -DOPTIONS_ENABLE_SCCACHE=OFF
             -DCMAKE_PREFIX_PATH="$QT_PREFIX"
           )
@@ -506,14 +616,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-${{ matrix.platform }}-${{ hashFiles('tools/qt/qt-version.sh') }}-${{ github.sha }}
+          key: ccache-${{ matrix.platform }}-${{ steps.cip.outputs.sha }}-${{ github.sha }}
 
       - name: Save vcpkg binary (desktop)
         if: always() && steps.vcpkg_cache_desktop.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**', 'tools/qt/qt-version.sh') }}
+          key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**') }}-${{ steps.cip.outputs.sha }}
 
       - name: Deploy Qt runtime
         shell: bash

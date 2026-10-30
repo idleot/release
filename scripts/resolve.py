@@ -7,6 +7,10 @@ COMPONENTS / a `[release:all]` flag in the tag annotation. The Tauri launcher li
 apps/launcher/package.json "version" changed. The Qt CIP launcher ships with
 the client; when that package.json is gone, the launcher component is skipped.
 
+Stock host is apps/qtclient (public qtclient/qtclient). Product pack is
+apps/idleot-client — a pack pin change rebuilds the client (cmake links the
+MODULE at configure time).
+
 Env:
   GH_TOKEN     token that can read idleot/idleot (and idleot/portal contents)
   OWNER        GitHub org (idleot)
@@ -29,7 +33,16 @@ import urllib.error
 import urllib.request
 
 API = "https://api.github.com"
-ENGINES = {"client": "apps/otclient", "server": "apps/crystalserver", "portal": "apps/portal"}
+ENGINES = {
+    "client": "apps/qtclient",
+    "server": "apps/crystalserver",
+    "portal": "apps/portal",
+}
+# Product packs are not standalone deployables — pin changes select "client".
+PACKS = {
+    "idleot_client": "apps/idleot-client",
+}
+PINS = {**ENGINES, **PACKS}
 COMPONENTS = [*ENGINES, "launcher"]
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -54,10 +67,13 @@ def gh(path: str):
 
 def pins(repo: str, ref: str) -> dict[str, str]:
     out = {}
-    for comp, path in ENGINES.items():
+    for comp, path in PINS.items():
         entry = gh(f"/repos/{repo}/contents/{path}?ref={ref}")
         if entry and entry.get("type") == "submodule":
             out[comp] = entry["sha"]
+        elif comp in PACKS:
+            # Pack submodule may be absent on older tags; empty means stock-only build.
+            out[comp] = ""
         else:
             raise SystemExit(f"[resolve] {path} is not a submodule at {ref}")
     return out
@@ -122,7 +138,10 @@ def main() -> int:
             reason = "[release:all]" if prev else "first release"
         else:
             before = pins(repo, prev)
-            selected = {c for c in ENGINES if before[c] != current[c]}
+            selected = {c for c in ENGINES if before.get(c) != current.get(c)}
+            # Pack pin change → rebuild client (MODULE is compiled into the host).
+            if before.get("idleot_client") != current.get("idleot_client"):
+                selected.add("client")
             if "portal" in selected and tauri_version:
                 if tauri_version != launcher_version(owner, before["portal"]):
                     selected.add("launcher")
@@ -152,6 +171,8 @@ def main() -> int:
         "previous": prev or "",
         "reason": reason,
         "otclient_sha": current["client"],
+        "qtclient_sha": current["client"],
+        "idleot_client_sha": current.get("idleot_client") or "",
         "crystalserver_sha": current["server"],
         "portal_sha": current["portal"],
         "client": str("client" in selected).lower(),

@@ -29,7 +29,9 @@ import sys
 import zipfile
 from pathlib import Path
 
-OTC = Path(__file__).resolve().parents[2] / "otclient"
+# Monorepo: apps/qtclient. Standalone release checkout may still have apps/otclient alias.
+_ROOT = Path(__file__).resolve().parents[2]
+OTC = _ROOT / "qtclient" if (_ROOT / "qtclient").is_dir() else _ROOT / "otclient"
 
 # Tip packages[].directoryname → packages/<name>/ on disk (also used as name).
 # CipSoft uses name "Tibia" + directoryname "Tibia.app"; IdleOT uses IdleOT.app for both.
@@ -404,7 +406,7 @@ def emit_cip(
     write_json(out / "launcher" / "tibiametadata.json", metadata)
     print(f"[assemble] tip variant={tip_variant} directoryname={tip_dir}")
     # Prefer release-vendored tips (idleot/release CI has no otclient/ tree), then
-    # monorepo apps/otclient/data, then whatever --previous already put in out/.
+    # monorepo apps/qtclient/data, then whatever --previous already put in out/.
     release_root = Path(__file__).resolve().parents[1]
     hint_candidates = (
         release_root / "vendor" / "launcher-hints" / "hints.json",

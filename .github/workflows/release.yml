@@ -61,6 +61,8 @@ jobs:
     outputs:
       release_id: ${{ steps.id.outputs.release_id }}
       otclient_sha: ${{ steps.pins.outputs.otclient_sha }}
+      qtclient_sha: ${{ steps.pins.outputs.qtclient_sha }}
+      idleot_client_sha: ${{ steps.pins.outputs.idleot_client_sha }}
       crystalserver_sha: ${{ steps.pins.outputs.crystalserver_sha }}
       portal_sha: ${{ steps.pins.outputs.portal_sha }}
       client: ${{ steps.pins.outputs.client }}
@@ -122,7 +124,8 @@ jobs:
     uses: ./.github/workflows/build-client.yml
     secrets: inherit
     with:
-      otclient_sha: ${{ needs.resolve.outputs.otclient_sha }}
+      qtclient_sha: ${{ needs.resolve.outputs.qtclient_sha || needs.resolve.outputs.otclient_sha }}
+      idleot_client_sha: ${{ needs.resolve.outputs.idleot_client_sha }}
       release_id: ${{ needs.resolve.outputs.release_id }}
 
   build-launcher:
