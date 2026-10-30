@@ -1,29 +1,13 @@
 ---
-# Build the release clients (browser WASM + desktop Linux/Windows/macOS) from
-# public/private qtclient (stock host) + idleot/idleot-client (product pack) at
-# pinned SHAs and push them as private, files-only slice images tagged :<sha>.
-# Nothing is promoted here — release.yml hands the tags to bundle.yml after
-# the server is live.
-# Image name otclient-wasm is kept for CDN/ACL (contents = tibia.js/wasm + pack).
+# Assemble release client slices from prebuilt Soft host + IdleOT pack artifacts.
+# Does NOT compile tibia/wasm — waits for qtclient CI host artifacts and
+# idleot-client pack artifacts, merges pack into tip, brands IdleOT, pushes GHCR.
 #
-# This repo is public (free runners), so:
-#   - Compiler output goes to files; logs show only an error summary.
-#   - Opaque caches only: pinned Qt SDK/emsdk + vcpkg binary cache + ccache (no source).
-#   - Artifacts hold only the content store the CDN publishes anyway.
-#
-# Desktop: tibia (Qt/QML in src/tibia) → image tibia-desktop. Browser: tibia
-# under Qt emsdk → image otclient-wasm (name kept for CDN/ACL; contents are
-# tibia.js / tibia.wasm). C++ deps: vcpkg manifest + binary cache. QML compiled in.
-# Code signing turns on by itself once its secrets exist (unsigned otherwise):
-#   Windows (Azure Trusted Signing): AZURE_TENANT_ID, AZURE_CLIENT_ID,
-#     AZURE_CLIENT_SECRET + vars TRUSTED_SIGNING_ENDPOINT,
-#     TRUSTED_SIGNING_ACCOUNT, TRUSTED_SIGNING_PROFILE
-#   macOS (Developer ID + notarization): MACOS_CERTIFICATE_P12 (base64),
-#     MACOS_CERTIFICATE_PASSWORD, MACOS_SIGN_IDENTITY, APPLE_ID, APPLE_TEAM_ID,
-#     APPLE_APP_PASSWORD
+# Image names kept for CDN/ACL: otclient-wasm (tibia.js/wasm + mods/idleot),
+# tibia-desktop (Soft tip + pack + installers).
 name: Build client
 
-run-name: Build client ${{ inputs.qtclient_sha || inputs.otclient_sha }} ${{ inputs.release_id }}
+run-name: Assemble client ${{ inputs.qtclient_sha || inputs.otclient_sha }} ${{ inputs.release_id }}
 
 on:
   workflow_call:
@@ -36,12 +20,12 @@ on:
         type: string
         required: false
         default: ""
-        description: Compat alias for qtclient_sha (one release)
+        description: Compat alias for qtclient_sha
       idleot_client_sha:
         type: string
         required: false
         default: ""
-        description: idleot/idleot-client pack SHA (optional; tip stages mods/idleot)
+        description: idleot/idleot-client pack SHA
       release_id:
         type: string
         default: ""
@@ -53,7 +37,7 @@ on:
   workflow_dispatch:
     inputs:
       qtclient_sha:
-        description: qtclient commit SHA (full); stock host
+        description: qtclient commit SHA (full); Soft host artifact tag
         required: false
         default: ""
       otclient_sha:
@@ -76,22 +60,33 @@ env:
   REGISTRY: ghcr.io/${{ github.repository_owner }}
   SHA: ${{ inputs.qtclient_sha || inputs.otclient_sha }}
   IDLEOT_CLIENT_SHA: ${{ inputs.idleot_client_sha }}
-  # Stock host is the public CIP-clone; product pack is idleot/idleot-client.
   QTCLIENT_REPO: qtclient/qtclient
   IDLEOT_CLIENT_REPO: ${{ github.repository_owner }}/idleot-client
   DESKTOP_IMAGE: tibia-desktop
+  # Soft host artifacts published by qtclient ci-host.yml
+  HOST_OWNER: qtclient
 
 jobs:
   check:
-    name: Check existing slices
+    name: Wait host + pack artifacts
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 130
     outputs:
       wasm: ${{ steps.exists.outputs.wasm }}
       desktop: ${{ steps.exists.outputs.desktop }}
       revision: ${{ steps.exists.outputs.revision }}
       desktop_image: ${{ steps.exists.outputs.desktop_image }}
+      pack_tag: ${{ steps.exists.outputs.pack_tag }}
     steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: true
+
+      - uses: oras-project/setup-oras@v1
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -99,238 +94,122 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Look up :sha tags
+      - name: Validate pins + wait
         id: exists
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::qtclient_sha (or otclient_sha alias) must be a full commit SHA"; exit 1; }
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::qtclient_sha (or otclient_sha) must be a full commit SHA"; exit 1
+          }
           echo "desktop_image=$DESKTOP_IMAGE" >> "$GITHUB_OUTPUT"
-          # Pack is compiled into the host MODULE at configure time. A :<qtclient_sha>
-          # tag may be stock-only or an older pack — force rebuild when pack is pinned.
-          force_rebuild=false
-          if [[ -n "${IDLEOT_CLIENT_SHA}" ]]; then
-            [[ "$IDLEOT_CLIENT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
-              echo "::error::idleot_client_sha must be a full commit SHA when set"; exit 1
-            }
-            force_rebuild=true
-            echo "idleot-client pack pinned (${IDLEOT_CLIENT_SHA::7}) — rebuilding slices"
+
+          if [[ -z "${IDLEOT_CLIENT_SHA}" ]]; then
+            echo "::error::idleot_client_sha required (assemble merges pack into tip)"; exit 1
           fi
+          [[ "$IDLEOT_CLIENT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::idleot_client_sha must be a full commit SHA"; exit 1
+          }
+          pack_tag="${IDLEOT_CLIENT_SHA}-host-${SHA}"
+          echo "pack_tag=$pack_tag" >> "$GITHUB_OUTPUT"
+
+          # Skip assemble when product slices already exist for this host+pack pair.
+          # Tag remains :<qtclient_sha> for CDN; pack pin is recorded in revision.
           for slice in wasm desktop; do
             image="otclient-wasm"
             [[ "$slice" == desktop ]] && image="$DESKTOP_IMAGE"
-            if [[ "$force_rebuild" != true ]] && docker buildx imagetools inspect "$REGISTRY/$image:$SHA" >/dev/null 2>&1; then
-              echo "$slice=true" >> "$GITHUB_OUTPUT"; echo "$image:$SHA exists — skipping"
+            if docker buildx imagetools inspect "$REGISTRY/$image:$SHA" >/dev/null 2>&1; then
+              echo "$slice=true" >> "$GITHUB_OUTPUT"
+              echo "$image:$SHA exists — skip assemble"
             else
               echo "$slice=false" >> "$GITHUB_OUTPUT"
             fi
           done
-          pack_rev=""
-          [[ -n "${IDLEOT_CLIENT_SHA}" ]] && pack_rev="-${IDLEOT_CLIENT_SHA::7}"
-          echo "revision=$(date -u +%Y%m%d)-${SHA::7}${pack_rev}" >> "$GITHUB_OUTPUT"
+
+          echo "revision=$(date -u +%Y%m%d)-${SHA::7}-${IDLEOT_CLIENT_SHA::7}" >> "$GITHUB_OUTPUT"
+
+          # Wait for Soft host + pack artifacts (do not rebuild).
+          bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${SHA}" 7200 90
+          bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" 7200 90
+          for plat in linux-x64 windows-x64 macos-arm64; do
+            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-${plat}:${SHA}" 7200 90
+          done
+          bash scripts/wait-ghcr-artifact.sh \
+            "ghcr.io/${{ github.repository_owner }}/pack-idleot-wasm:${pack_tag}" 7200 90
+          for plat in linux-x64 windows-x64 macos-arm64; do
+            bash scripts/wait-ghcr-artifact.sh \
+              "ghcr.io/${{ github.repository_owner }}/pack-idleot-${plat}:${pack_tag}" 7200 90
+          done
 
   wasm:
-    name: WASM
+    name: Assemble WASM tip
     needs: [check]
     if: needs.check.outputs.wasm != 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 30
     environment: release
     steps:
-      - name: Checkout qtclient
+      - name: Checkout release scripts + qtclient pack helpers
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Checkout qtclient (pack-tibia / merge scripts)
         uses: actions/checkout@v5
         with:
           repository: ${{ env.QTCLIENT_REPO }}
           ref: ${{ env.SHA }}
           token: ${{ secrets.RELEASE_TOKEN }}
+          path: _qtclient
           persist-credentials: false
-          submodules: false
-
-      - name: Checkout idleot-client pack
-        if: env.IDLEOT_CLIENT_SHA != ''
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ env.IDLEOT_CLIENT_REPO }}
-          ref: ${{ env.IDLEOT_CLIENT_SHA }}
-          token: ${{ secrets.RELEASE_TOKEN }}
-          path: _idleot-client
-          persist-credentials: false
-          submodules: false
-
-      - name: Stage IdleOT pack into qtclient mods/
-        if: env.IDLEOT_CLIENT_SHA != ''
-        run: |
-          set -euo pipefail
-          mkdir -p client/mods launcher/mods
-          rm -rf client/mods/idleot launcher/mods/idleot
-          cp -a _idleot-client/client client/mods/idleot
-          cp -a _idleot-client/launcher launcher/mods/idleot
-          test -f client/mods/idleot/mod.json
-          test -f client/mods/idleot/qml/idleot/qmldir
-
-      - name: Resolve CIP Qt SHA
-        id: cip
-        run: |
-          set -euo pipefail
-          SHA="$(git rev-parse HEAD:third_party/qt5-cip)"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build python3-venv ccache libegl1-mesa-dev libfontconfig1-dev \
-            libxkbcommon-dev gzip brotli git curl zip unzip tar zstd >/dev/null
-          ccache --max-size=3G
-          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
-          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          sparse-checkout: |
+            deploy
+            tools/publish
+          sparse-checkout-cone-mode: true
 
       - uses: oras-project/setup-oras@v1
-
-      - name: Cache Qt (CIP wasm)
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/Qt
-          key: cip-qt-wasm_multithread-${{ steps.cip.outputs.sha }}
-
-      # restore/save split: save-always is deprecated and does not persist on failure.
-      - name: Restore ccache (wasm)
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/ccache
-          key: ccache-wasm-${{ steps.cip.outputs.sha }}-${{ github.sha }}
-          restore-keys: |
-            ccache-wasm-${{ steps.cip.outputs.sha }}-
-            ccache-wasm-
-
-      - name: Restore vcpkg binary (wasm)
-        id: vcpkg_cache_wasm
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**') }}-${{ steps.cip.outputs.sha }}
-          restore-keys: |
-            vcpkg-wasm-${{ hashFiles('vcpkg.json') }}-
-            vcpkg-wasm-
-
-      - name: Setup vcpkg
-        run: |
-          export VCPKG_BINARY_CACHE_DIR="$RUNNER_TEMP/vcpkg-binary-cache"
-          # shellcheck disable=SC1091
-          source deploy/ci-setup-vcpkg.sh
-
-      - name: Install CIP Qt for WebAssembly + emsdk
-        env:
-          QT_ROOT: ${{ runner.temp }}/Qt
-          # RELEASE_TOKEN can read private ghcr.io/qtclient/qt-cip; GITHUB_TOKEN cannot.
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          GITHUB_ACTOR: ${{ github.repository_owner }}
-        run: bash tools/qt/ci-setup-qt.sh --wasm
-
-      - name: Configure tibia wasm
-        id: wasm_build
-        env:
-          QT_ROOT: ${{ runner.temp }}/Qt
-        run: |
-          summary() {
-            echo "::group::error summary ($1)"
-            # Prefer real failures; exclude vcpkg install chatter that drowned the previous greps.
-            grep -E "(error:|Error:|FAILED:|CMake Error|ninja: build|undefined reference|fatal error)" "$1" \
-              | grep -vE "^[[:space:]]*(-|#)" | cut -c1-400 | tail -n 80 || true
-            echo "::endgroup::"
-            echo "::group::log tail ($1)"
-            tail -n 100 "$1"
-            echo "::endgroup::"
-            {
-              echo "### Configure failed (wasm)"
-              echo '```'
-              tail -n 80 "$1"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          }
-          mkdir -p "$CCACHE_DIR"
-          ccache --max-size=3G
-          ccache -z
-          df -h "$RUNNER_TEMP" "$HOME" . || true
-          echo "::group::cache restore status"
-          echo "vcpkg cache-hit=${{ steps.vcpkg_cache_wasm.outputs.cache-hit }}"
-          echo "vcpkg cache-matched-key=${{ steps.vcpkg_cache_wasm.outputs.cache-matched-key }}"
-          ls -la "$RUNNER_TEMP/vcpkg-binary-cache" 2>/dev/null | head -5 || echo "vcpkg cache dir empty"
-          echo "::endgroup::"
-          if ! bash deploy/build-tibia.sh --wasm > "$RUNNER_TEMP/wasm-build.log" 2>&1; then
-            summary "$RUNNER_TEMP/wasm-build.log"; exit 1
-          fi
-          echo "::group::ccache stats (wasm)"
-          ccache -sv 2>/dev/null || ccache -s
-          echo "::endgroup::"
-          echo "build ok ($(wc -l < "$RUNNER_TEMP/wasm-build.log") lines suppressed)"
-          {
-            echo "### wasm build"
-            echo "- log lines: $(wc -l < "$RUNNER_TEMP/wasm-build.log")"
-            echo "- vcpkg cache-hit: ${{ steps.vcpkg_cache_wasm.outputs.cache-hit }}"
-            ccache -s 2>/dev/null | head -20 || true
-          } >> "$GITHUB_STEP_SUMMARY"
-          NOTES="$(find build/tibia-wasm -name tibia-wasm-size.txt -type f | head -1 || true)"
-          [[ -n "$NOTES" ]] || { echo "::error::tibia-wasm-size.txt missing"; exit 1; }
-          cat "$NOTES"
-          WASM="$(find build/tibia-wasm -name tibia.wasm \( -type f -o -type l \) | head -1)"
-          test -n "$WASM" && test -e "$WASM"
-          wasm_bytes=$(wc -c < "$WASM" | tr -d ' ')
-          echo "tibia.wasm bytes=$wasm_bytes"
-          if [[ "$wasm_bytes" -lt 5000000 ]]; then
-            echo "::error::tibia.wasm < 5MB — incomplete wasm link"
-            exit 1
-          fi
-
-      - name: Upload wasm build log on failure
-        if: failure() && steps.wasm_build.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-build-log
-          path: ${{ runner.temp }}/wasm-build.log
-          if-no-files-found: ignore
-
-      # Persist caches even when the build fails (cold vcpkg was burning ~40m each warm).
-      - name: Save ccache (wasm)
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/ccache
-          key: ccache-wasm-${{ steps.cip.outputs.sha }}-${{ github.sha }}
-
-      - name: Save vcpkg binary (wasm)
-        if: always() && steps.vcpkg_cache_wasm.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-wasm-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**') }}-${{ steps.cip.outputs.sha }}
-      - name: Pack wasm slice
-        env:
-          IDLEOT_ENGINE_SHA: ${{ env.SHA }}
-          IDLEOT_CLIENT_REVISION: ${{ needs.check.outputs.revision }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/slice"
-          bash deploy/pack-tibia-wasm.sh build/tibia-wasm "$RUNNER_TEMP/slice"
-          # pack-tibia-wasm writes .qtclient/wasm.json (CDN schema); keep IdleOT alias for assemble.
-          mkdir -p "$RUNNER_TEMP/slice/.idleot"
-          cp -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" "$RUNNER_TEMP/slice/.idleot/wasm.json"
-          test -f "$RUNNER_TEMP/slice/.idleot/wasm.json"
-          js="$(find "$RUNNER_TEMP/slice/client" -name tibia.js | head -1 || true)"
-          [[ -n "$js" && -f "$js" ]] || {
-            echo "::error::tibia.js missing under slice/client after pack"
-            find "$RUNNER_TEMP/slice" -maxdepth 5 -type f | head -40 || true
-            find build/tibia-wasm -maxdepth 3 -name 'tibia.*' 2>/dev/null | head -40 || true
-            exit 1
-          }
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull host-wasm + pack
+        run: |
+          set -euo pipefail
+          bash scripts/pull-oras-dir.sh \
+            "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" "$RUNNER_TEMP/host-wasm"
+          bash scripts/pull-oras-dir.sh \
+            "ghcr.io/${{ github.repository_owner }}/pack-idleot-wasm:${{ needs.check.outputs.pack_tag }}" \
+            "$RUNNER_TEMP/pack"
+          pack="$RUNNER_TEMP/pack"
+          [[ -f "$pack/mod.json" ]] || pack="$RUNNER_TEMP/pack/idleot"
+          test -f "$pack/mod.json"
+          bash _qtclient/deploy/merge-pack-into-tip.sh \
+            --pack "$pack" --tip "$RUNNER_TEMP/host-wasm" --platform wasm
+          mkdir -p "$RUNNER_TEMP/slice"
+          # Host pack already ran pack-tibia-wasm; copy tip tree into slice.
+          if [[ -d "$RUNNER_TEMP/host-wasm/client" ]]; then
+            cp -a "$RUNNER_TEMP/host-wasm/." "$RUNNER_TEMP/slice/"
+          else
+            bash _qtclient/deploy/pack-tibia-wasm.sh "$RUNNER_TEMP/host-wasm" "$RUNNER_TEMP/slice"
+            bash _qtclient/deploy/merge-pack-into-tip.sh \
+              --pack "$pack" --tip "$RUNNER_TEMP/slice" --platform wasm
+          fi
+          mkdir -p "$RUNNER_TEMP/slice/.idleot"
+          if [[ -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" ]]; then
+            cp -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" "$RUNNER_TEMP/slice/.idleot/wasm.json"
+          fi
+          js="$(find "$RUNNER_TEMP/slice" -name tibia.js | head -1 || true)"
+          [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing after assemble"; exit 1; }
+          test -d "$(dirname "$js")/mods/idleot"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Push otclient-wasm:${{ env.SHA }}
         working-directory: ${{ runner.temp }}/slice
@@ -341,7 +220,7 @@ jobs:
             -t "${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}" .
 
   desktop:
-    name: Desktop (${{ matrix.platform }})
+    name: Assemble desktop (${{ matrix.platform }})
     needs: [check]
     if: needs.check.outputs.desktop != 'true'
     strategy:
@@ -350,40 +229,39 @@ jobs:
         include:
           - platform: linux-x64
             os: ubuntu-24.04
-            preset: linux-release
-            triplet: ""
-            cflags: -w -fno-diagnostics-show-caret
           - platform: windows-x64
-            os: windows-2025-vs2026
-            preset: windows-release
-            triplet: ""
-            cflags: -w
+            os: windows-latest
           - platform: macos-arm64
             os: macos-15
-            preset: macos-release
-            triplet: ""
-            cflags: -w -fno-caret-diagnostics
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
+    timeout-minutes: 60
     environment: release
     env:
-      CFLAGS: ${{ matrix.cflags }}
-      CXXFLAGS: ${{ matrix.cflags }}
       PYTHONUTF8: "1"
       WINDOWS_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
       MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+      QTCLIENT_APP_NAME: IdleOT
+      QTCLIENT_BUNDLE_ID: com.idleot.tibia
+      QTCLIENT_STORE_META: .idleot
     steps:
-      - name: Checkout qtclient
+      - name: Checkout release scripts
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Checkout qtclient (publish scripts + packaging)
         uses: actions/checkout@v5
         with:
           repository: ${{ env.QTCLIENT_REPO }}
           ref: ${{ env.SHA }}
           token: ${{ secrets.RELEASE_TOKEN }}
+          path: _qtclient
           persist-credentials: false
           submodules: false
 
-      - name: Checkout idleot-client pack
-        if: env.IDLEOT_CLIENT_SHA != ''
+      - name: Checkout idleot-client (launcher brand / icons)
         uses: actions/checkout@v5
         with:
           repository: ${{ env.IDLEOT_CLIENT_REPO }}
@@ -393,284 +271,72 @@ jobs:
           persist-credentials: false
           submodules: false
 
-      - name: Stage IdleOT pack into qtclient mods/
-        if: env.IDLEOT_CLIENT_SHA != ''
+      - uses: oras-project/setup-oras@v1
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull host + pack
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p client/mods launcher/mods
-          rm -rf client/mods/idleot launcher/mods/idleot
-          cp -a _idleot-client/client client/mods/idleot
-          cp -a _idleot-client/launcher launcher/mods/idleot
-          test -f client/mods/idleot/mod.json
-          test -f client/mods/idleot/qml/idleot/qmldir
+          bash scripts/pull-oras-dir.sh \
+            "ghcr.io/${HOST_OWNER}/qtclient-host-${{ matrix.platform }}:${SHA}" \
+            "$RUNNER_TEMP/host"
+          bash scripts/pull-oras-dir.sh \
+            "ghcr.io/${{ github.repository_owner }}/pack-idleot-${{ matrix.platform }}:${{ needs.check.outputs.pack_tag }}" \
+            "$RUNNER_TEMP/pack"
+          pack="$RUNNER_TEMP/pack"
+          [[ -f "$pack/mod.json" ]] || pack="$RUNNER_TEMP/pack/idleot"
+          test -f "$pack/mod.json"
+          echo "PACK_DIR=$pack" >> "$GITHUB_ENV"
+          # Stage pack sources for brand.cmake / icons discovery in package_desktop.
+          mkdir -p _qtclient/client/mods _qtclient/launcher/mods
+          cp -a _idleot-client/client _qtclient/client/mods/idleot
+          cp -a _idleot-client/launcher _qtclient/launcher/mods/idleot
+          # Merge compiled pack into Soft engine tip.
+          tip="$RUNNER_TEMP/host/engine"
+          [[ -d "$tip" ]] || tip="$RUNNER_TEMP/host"
+          bash _qtclient/deploy/merge-pack-into-tip.sh \
+            --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
+          echo "ENGINE_TIP=$tip" >> "$GITHUB_ENV"
 
-      - name: Resolve CIP Qt SHA
+      - name: Install Linux packaging deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq patchelf >/dev/null
+
+      - name: Resolve CIP Qt (for windeploy/macdeploy if re-bundle needed)
         id: cip
         shell: bash
+        working-directory: _qtclient
         run: |
           set -euo pipefail
-          SHA="$(git rev-parse HEAD:third_party/qt5-cip)"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "short=${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          SHA="$(git rev-parse HEAD:third_party/qt5-cip 2>/dev/null || true)"
+          if [[ -z "$SHA" && -f third_party/SUBMODULE_PINS.txt ]]; then
+            SHA="$(awk '/^qt5-cip/{print $2}' third_party/SUBMODULE_PINS.txt)"
+          fi
+          echo "sha=${SHA:-unknown}" >> "$GITHUB_OUTPUT"
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq autoconf autoconf-archive automake gcc-14 g++-14 ccache \
-            libgl1-mesa-dev libglu1-mesa-dev libltdl-dev libtool libtool-bin \
-            libx11-dev libx11-xcb-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev \
-            linux-libc-dev make ninja-build perl pkg-config \
-            python3-venv patchelf libegl1-mesa-dev libfontconfig1-dev \
-            libxkbcommon-dev libxkbcommon-x11-0 >/dev/null
-          echo "CC=gcc-14" >> "$GITHUB_ENV"
-          echo "CXX=g++-14" >> "$GITHUB_ENV"
-          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
-          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
-          ccache --max-size=4G
-
-      - name: Install macOS dependencies
+      - name: Ad-hoc sign / brand macOS engine
         if: runner.os == 'macOS'
-        run: |
-          brew list ninja >/dev/null 2>&1 || brew install ninja
-          brew list ccache >/dev/null 2>&1 || brew install ccache
-          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
-          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
-          ccache --max-size=4G
-
-      # windows-release preset enables sccache, but CI never installed it (or ccache).
-      # Use ccache on all three desktop platforms and the same GHA cache path.
-      - name: Install Windows dependencies
-        if: runner.os == 'Windows'
         shell: bash
         run: |
-          choco install ccache ninja -y --no-progress
-          # Git Bash PATH often misses Chocolatey shims until refreshed.
-          echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
-          export PATH="/c/ProgramData/chocolatey/bin:$PATH"
-          command -v ccache >/dev/null || { echo "::error::ccache not on PATH after choco install"; exit 1; }
-          command -v ninja >/dev/null || { echo "::error::ninja not on PATH after choco install"; exit 1; }
-          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
-          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
-          ccache --version
-          ccache --max-size=4G
-
-      - uses: oras-project/setup-oras@v1
-
-      - name: Restore Qt (CIP)
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/Qt
-          key: cip-qt-${{ matrix.platform }}-${{ steps.cip.outputs.sha }}
-
-      - name: Restore ccache (desktop)
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/ccache
-          key: ccache-${{ matrix.platform }}-${{ steps.cip.outputs.sha }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ matrix.platform }}-${{ steps.cip.outputs.sha }}-
-            ccache-${{ matrix.platform }}-
-
-      - name: Restore vcpkg binary (desktop)
-        id: vcpkg_cache_desktop
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**') }}-${{ steps.cip.outputs.sha }}
-          restore-keys: |
-            vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json') }}-
-            vcpkg-${{ matrix.platform }}-
-
-      - name: Setup vcpkg
-        shell: bash
-        run: |
-          export VCPKG_BINARY_CACHE_DIR="$RUNNER_TEMP/vcpkg-binary-cache"
-          # shellcheck disable=SC1091
-          source deploy/ci-setup-vcpkg.sh
-
-      # MSVC must be on PATH before Install CIP Qt — GHCR miss falls back to compiling Qt.
-      - name: Remove Windows pre-installed MySQL
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Remove-Item -Recurse -Force C:\mysql* -ErrorAction SilentlyContinue
-
-      - name: MSVC environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Install CIP Qt
-        shell: bash
-        env:
-          QT_ROOT: ${{ runner.temp }}/Qt
-          # RELEASE_TOKEN can read private ghcr.io/qtclient/qt-cip; GITHUB_TOKEN cannot.
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          GITHUB_ACTOR: ${{ github.repository_owner }}
-        run: |
-          if ! bash tools/qt/ci-setup-qt.sh > "$RUNNER_TEMP/qt.log" 2>&1; then
-            tail -n 40 "$RUNNER_TEMP/qt.log"; exit 1
+          set -euo pipefail
+          app="$(find "$ENGINE_TIP" -maxdepth 2 -name '*.app' -type d | head -1)"
+          [[ -n "$app" ]] || { echo "::error::no .app in $ENGINE_TIP"; exit 1; }
+          # Rename stock Soft brand → IdleOT.app for Gatekeeper / tip layout.
+          dest="$(dirname "$app")/IdleOT.app"
+          if [[ "$app" != "$dest" ]]; then
+            rm -rf "$dest"
+            mv "$app" "$dest"
+            app="$dest"
           fi
-          prefix="$(bash tools/qt/qt-prefix.sh)"
-          [[ -n "$prefix" ]] || { echo "::error::Qt install finished but tools/qt/qt-prefix.sh finds no Qt"; exit 1; }
-          echo "QT_PREFIX=$prefix" >> "$GITHUB_ENV"
-          mkdir -p "${CCACHE_DIR:-$RUNNER_TEMP/ccache}"
-          if command -v ccache >/dev/null; then
-            ccache --max-size=4G
-            ccache -z
-            ccache -s || true
-          else
-            echo "::error::ccache missing on ${{ matrix.platform }} — desktop builds must be cached"
-            exit 1
-          fi
-
-      - name: Configure and build (quiet)
-        shell: bash
-        run: |
-          summary() {
-            echo "::group::error summary ($1)"
-            grep -nE "FAILED:|CMake Error|error:|fatal error|error C[0-9]|LNK[0-9]|vcpkg" "$1" \
-              | grep -vE "^[[:space:]]*(-|#)" | cut -c1-500 | head -n 80 || true
-            echo "---- tail ----"
-            tail -n 80 "$1" || true
-            echo "::endgroup::"
-          }
-          # Force ccache on every desktop platform (presets agree: OPTIONS_ENABLE_CCACHE).
-          # CMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded (/Z7) for ccache on MSVC.
-          [[ -n "${VCPKG_ROOT:-}" ]] || { echo "::error::VCPKG_ROOT unset"; exit 1; }
-          test -f "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" || {
-            echo "::error::missing $VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"; exit 1
-          }
-          # Point binary cache at the GHA cache dir (presets otherwise use ../../.cache).
-          export VCPKG_DEFAULT_BINARY_CACHE="${VCPKG_DEFAULT_BINARY_CACHE:-$RUNNER_TEMP/vcpkg-binary-cache}"
-          export VCPKG_BINARY_SOURCES="${VCPKG_BINARY_SOURCES:-clear;files,$VCPKG_DEFAULT_BINARY_CACHE,readwrite}"
-          args=(
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-            -DTOGGLE_BIN_FOLDER=ON -DOPTIONS_ENABLE_IPO=OFF -DTIBIA_BUILD_TESTS=OFF
-            -DOPTIONS_ENABLE_CCACHE=ON -DOPTIONS_ENABLE_SCCACHE=OFF
-            -DCMAKE_PREFIX_PATH="$QT_PREFIX"
-          )
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            args+=(-DBUILD_STATIC_LIBRARY=OFF
-                   -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
-                   -DVCPKG_TARGET_TRIPLET=x64-windows-static-md)
-            export PATH="/c/ProgramData/chocolatey/bin:$PATH"
-            export VCPKG_TARGET_TRIPLET=x64-windows-static-md
-          elif [[ "$RUNNER_OS" == macOS ]]; then
-            args+=(-DVCPKG_TARGET_TRIPLET=arm64-osx-static)
-            export VCPKG_TARGET_TRIPLET=arm64-osx-static
-          else
-            args+=(-DVCPKG_TARGET_TRIPLET=x64-linux-static)
-            export VCPKG_TARGET_TRIPLET=x64-linux-static
-          fi
-          echo "cmake --preset ${{ matrix.preset }} toolchain=$VCPKG_ROOT triplet=$VCPKG_TARGET_TRIPLET"
-          if ! cmake --preset "${{ matrix.preset }}" "${args[@]}" > "$RUNNER_TEMP/configure.log" 2>&1; then
-            summary "$RUNNER_TEMP/configure.log"
-            {
-              echo "### Configure failed (${{ matrix.platform }})"
-              echo '```'
-              tail -n 80 "$RUNNER_TEMP/configure.log"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          if ! grep -qiE "ccache|compiler launcher" "$RUNNER_TEMP/configure.log"; then
-            echo "::warning::configure log has no ccache mention — check OPTIONS_ENABLE_CCACHE"
-          fi
-          echo "configure ok ($(wc -l < "$RUNNER_TEMP/configure.log") lines suppressed)"
-          if ! cmake --build --preset "${{ matrix.preset }}" --target tibia > "$RUNNER_TEMP/build.log" 2>&1; then
-            summary "$RUNNER_TEMP/build.log"
-            # Keep the full log so the next Windows diagnosis can name the TU.
-            if [[ "$RUNNER_OS" == Windows ]]; then
-              mkdir -p "$RUNNER_TEMP/fail-logs"
-              cp "$RUNNER_TEMP/build.log" "$RUNNER_TEMP/fail-logs/build.log"
-            fi
-            exit 1
-          fi
-          echo "tibia build ok ($(wc -l < "$RUNNER_TEMP/build.log") lines suppressed)"
-          if ! cmake --build --preset "${{ matrix.preset }}" --target launcher > "$RUNNER_TEMP/launcher-build.log" 2>&1; then
-            summary "$RUNNER_TEMP/launcher-build.log"
-            if [[ "$RUNNER_OS" == Windows ]]; then
-              mkdir -p "$RUNNER_TEMP/fail-logs"
-              cp "$RUNNER_TEMP/launcher-build.log" "$RUNNER_TEMP/fail-logs/launcher-build.log"
-            fi
-            exit 1
-          fi
-          echo "launcher build ok ($(wc -l < "$RUNNER_TEMP/launcher-build.log") lines suppressed)"
-          echo "::group::ccache stats (${{ matrix.platform }})"
-          ccache -sv 2>/dev/null || ccache -s
-          echo "::endgroup::"
-          # Guard against silent /Zi regressions: cacheable ratio must look like
-          # linux/mac (~99%), not the old Windows 0.3% uncacheable-PDB mode.
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            cacheable_pct="$(ccache -s | awk '/Cacheable calls:/{gsub(/[()%]/,"",$NF); print $NF; exit}')"
-            if [[ -n "$cacheable_pct" ]]; then
-              echo "windows cacheable_pct=${cacheable_pct}"
-              awk -v p="$cacheable_pct" 'BEGIN{exit !(p+0 >= 50)}' || {
-                echo "::error::Windows ccache cacheable calls are ${cacheable_pct}% (want ≥50). MSVC is likely still on /Zi — check CMAKE_MSVC_DEBUG_INFORMATION_FORMAT."
-                exit 1
-              }
-            fi
-          fi
-
-      - name: Upload Windows build log
-        if: failure() && runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-build-log
-          path: ${{ runner.temp }}/fail-logs/build.log
-          if-no-files-found: ignore
-          retention-days: 3
-
-      - name: Save ccache (desktop)
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/ccache
-          key: ccache-${{ matrix.platform }}-${{ steps.cip.outputs.sha }}-${{ github.sha }}
-
-      - name: Save vcpkg binary (desktop)
-        if: always() && steps.vcpkg_cache_desktop.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/vcpkg-binary-cache
-          key: vcpkg-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/triplets/**') }}-${{ steps.cip.outputs.sha }}
-
-      - name: Deploy Qt runtime
-        shell: bash
-        env:
-          # IdleOT pack brands the stock qtclient host for CDN / Gatekeeper.
-          QTCLIENT_APP_NAME: IdleOT
-          QTCLIENT_BUNDLE_ID: com.idleot.tibia
-          QTCLIENT_STORE_META: .idleot
-        run: |
-          # Prefer TOGGLE_BIN_FOLDER bin/; package_desktop also searches the preset root.
-          bin_dir="build/${{ matrix.preset }}/bin"
-          [[ -d "$bin_dir" ]] || bin_dir="build/${{ matrix.preset }}"
-          if ! python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
-              --bin "$bin_dir" --engine-bundle "build/${{ matrix.preset }}/engine" \
-              > "$RUNNER_TEMP/deploy.log" 2>&1; then
-            echo "::group::deploy.log"
-            cat "$RUNNER_TEMP/deploy.log" || true
-            echo "::endgroup::"
-            echo "::group::bin tree"
-            find "build/${{ matrix.preset }}" -maxdepth 5 \( -name client -o -name 'client.exe' -o -name '*.app' -o -type d -name bin \) 2>/dev/null | head -40 || true
-            echo "::endgroup::"
-            exit 1
-          fi
-          echo "qt runtime deployed ($(wc -l < "$RUNNER_TEMP/deploy.log") lines suppressed)"
-
-      - name: Ad-hoc sign app bundle
-        if: runner.os == 'macOS' && env.MACOS_SIGNING != 'true'
-        run: |
-          cd build/${{ matrix.preset }}/engine
-          xattr -cr IdleOT.app
-          codesign --force --deep --sign - IdleOT.app
+          xattr -cr "$app" || true
+          codesign --force --deep --sign - "$app" || true
+          echo "ENGINE_APP=$app" >> "$GITHUB_ENV"
 
       - name: Developer ID sign app bundle
         if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
@@ -689,11 +355,10 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$kc_pass" "$keychain" >/dev/null
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm -f "$RUNNER_TEMP/cert.p12"
-          cd build/${{ matrix.preset }}/engine
-          xattr -cr IdleOT.app
+          xattr -cr "$ENGINE_APP"
           codesign --force --deep --options runtime --timestamp \
-            --entitlements "$GITHUB_WORKSPACE/tools/publish/installer/idleot.entitlements" \
-            --sign "$MACOS_SIGN_IDENTITY" IdleOT.app
+            --entitlements "$GITHUB_WORKSPACE/_qtclient/tools/publish/installer/idleot.entitlements" \
+            --sign "$MACOS_SIGN_IDENTITY" "$ENGINE_APP"
 
       - name: Notarize engine bundle
         if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
@@ -702,11 +367,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          cd build/${{ matrix.preset }}/engine
-          ditto -c -k --keepParent IdleOT.app "$RUNNER_TEMP/IdleOT-engine.zip"
+          ditto -c -k --keepParent "$ENGINE_APP" "$RUNNER_TEMP/IdleOT-engine.zip"
           xcrun notarytool submit "$RUNNER_TEMP/IdleOT-engine.zip" --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
-          xcrun stapler staple IdleOT.app
+          xcrun stapler staple "$ENGINE_APP"
 
       - name: Sign client executable
         if: runner.os == 'Windows' && env.WINDOWS_SIGNING == 'true'
@@ -718,7 +382,7 @@ jobs:
           endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
-          files-folder: build/${{ matrix.preset }}/engine
+          files-folder: ${{ env.ENGINE_TIP }}
           files-folder-filter: exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -726,6 +390,7 @@ jobs:
 
       - name: Store engine and runtime
         shell: bash
+        working-directory: _qtclient
         env:
           SOURCE_COMMIT: ${{ env.SHA }}
           QTCLIENT_APP_NAME: IdleOT
@@ -736,40 +401,35 @@ jobs:
           TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
         run: |
+          set -euo pipefail
           extra=(--engine-files)
           [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--content-files)
           if [[ "${{ matrix.platform }}" == macos-arm64 ]]; then
-            extra+=(--engine-app "build/${{ matrix.preset }}/engine/IdleOT.app")
+            extra+=(--engine-app "${ENGINE_APP}")
           else
-            extra+=(--engine-dir "build/${{ matrix.preset }}/engine")
+            extra+=(--engine-dir "${ENGINE_TIP}")
           fi
-          bin_dir="build/${{ matrix.preset }}/bin"
-          [[ -d "$bin_dir" ]] || bin_dir="build/${{ matrix.preset }}"
+          bin_dir="$RUNNER_TEMP/host/bin"
+          [[ -d "$bin_dir" ]] || bin_dir="$ENGINE_TIP"
           python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
             --bin "$bin_dir" --out "$RUNNER_TEMP/dist" \
             --revision "${{ needs.check.outputs.revision }}" "${extra[@]}"
 
       - name: Package CIP launcher installer
         shell: bash
+        working-directory: _qtclient
         env:
-          QT_PREFIX: ${{ env.QT_PREFIX }}
           QTCLIENT_APP_NAME: IdleOT
           QTCLIENT_BUNDLE_ID: com.idleot.launcher
         run: |
-          # bin/ may be TOGGLE_BIN_FOLDER or the preset root; search both.
-          bin_dir="build/${{ matrix.preset }}/bin"
-          [[ -d "$bin_dir" ]] || bin_dir="build/${{ matrix.preset }}"
-          if ! python3 tools/publish/package_launcher.py \
-              --platform "${{ matrix.platform }}" \
-              --bin "$bin_dir" \
-              --out "$RUNNER_TEMP/dist" > "$RUNNER_TEMP/launcher-pack.log" 2>&1; then
-            cat "$RUNNER_TEMP/launcher-pack.log"; exit 1
-          fi
-          echo "launcher installer ok ($(wc -l < "$RUNNER_TEMP/launcher-pack.log") lines)"
+          set -euo pipefail
+          bin_dir="$RUNNER_TEMP/host/bin"
+          [[ -d "$bin_dir" ]] || bin_dir="$ENGINE_TIP"
+          python3 tools/publish/package_launcher.py \
+            --platform "${{ matrix.platform }}" \
+            --bin "$bin_dir" \
+            --out "$RUNNER_TEMP/dist"
 
-      # package_launcher.py only ad-hoc signs. Re-sign + notarize the downloadable
-      # IdleOT.app / .dmg when Developer ID secrets are present so Gatekeeper does
-      # not report "IdleOT.app is damaged" after a browser download.
       - name: Developer ID sign and notarize launcher
         if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
         env:
@@ -796,13 +456,12 @@ jobs:
           rm -f "$RUNNER_TEMP/launcher-cert.p12"
           xattr -cr "$app"
           codesign --force --deep --options runtime --timestamp \
-            --entitlements "$GITHUB_WORKSPACE/tools/publish/installer/idleot.entitlements" \
+            --entitlements "$GITHUB_WORKSPACE/_qtclient/tools/publish/installer/idleot.entitlements" \
             --sign "$MACOS_SIGN_IDENTITY" "$app"
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/IdleOT-launcher.zip"
           xcrun notarytool submit "$RUNNER_TEMP/IdleOT-launcher.zip" --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
           xcrun stapler staple "$app"
-          # Rebuild downloadable archives from the notarized app (preserve symlinks).
           ditto -c -k --keepParent "$app" "$zip"
           stage="$RUNNER_TEMP/launcher-dmg-stage"
           rm -rf "$stage"
@@ -815,7 +474,6 @@ jobs:
             --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
           xcrun stapler staple "$dmg"
           rm -rf "$stage" "$RUNNER_TEMP/IdleOT-launcher.zip"
-          echo "launcher notarized: $(wc -c < "$dmg") byte dmg"
 
       - name: Upload store
         uses: actions/upload-artifact@v4
@@ -829,6 +487,7 @@ jobs:
   desktop-publish:
     name: Push ${{ needs.check.outputs.desktop_image }}
     needs: [check, desktop]
+    if: needs.check.outputs.desktop != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -847,7 +506,6 @@ jobs:
             if [[ -d "$d/.idleot/v3" ]]; then
               cp "$d"/.idleot/v3/*.json slice/.idleot/v3/
             elif [[ -d "$d/.qtclient/v3" ]]; then
-              # Stock host lists; product assemble path is .idleot.
               cp "$d"/.qtclient/v3/*.json slice/.idleot/v3/
             else
               echo "::error::no v3 lists under $d (.idleot or .qtclient)"
@@ -861,14 +519,8 @@ jobs:
           for plat in windows-x64 macos-arm64 linux-x64; do
             if [[ "$plat" == macos-arm64 ]]; then
               [[ -f "slice/installers/${plat}.dmg" ]] || { echo "::error::missing installers/${plat}.dmg"; exit 1; }
-              echo "installer ${plat}: $(wc -c < "slice/installers/${plat}.dmg") byte dmg"
-              # Symlink-preserving zip is optional fallback for assemble.
-              if [[ -f "slice/installers/${plat}.zip" ]]; then
-                echo "installer ${plat} zip: $(wc -c < "slice/installers/${plat}.zip") bytes"
-              fi
             else
               [[ -f "slice/installers/${plat}.zip" ]] || { echo "::error::missing installers/${plat}.zip"; exit 1; }
-              echo "installer ${plat}: $(wc -c < "slice/installers/${plat}.zip") bytes"
             fi
           done
           python3 - <<'PY'
@@ -883,10 +535,6 @@ jobs:
                          if not (pathlib.Path("slice/content") / f["sha256"][:2] / f["sha256"]).is_file()]
               if missing:
                   raise SystemExit(f"{n}: {len(missing)} blobs missing, e.g. {missing[0]}")
-              packs = [p["sha256"] for p in d.get("packs", [])
-                       if not (pathlib.Path("slice/packs") / p["sha256"][:2] / f"{p['sha256']}.zip").is_file()]
-              if packs:
-                  raise SystemExit(f"{n}: {len(packs)} packs missing, e.g. {packs[0]}")
               print(f"{n}: {len(d['files'])} files, {len(d.get('packs', []))} packs")
           PY
           printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice

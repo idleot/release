@@ -26,10 +26,9 @@ resolve -> build missing GHCR images (client/server/portal)
         -> :latest = live, GitHub Release on the umbrella tag
 ```
 
-When images are already in GHCR, the build jobs still run if those components
-changed (rebuild). Pass `build_if_missing=false` only for a fail-fast promote
-that requires pre-warmed `:<sha>` tags. Optional `warm-client.yml` can still
-pre-build a client SHA without shipping.
+When images are already in GHCR, assemble skips. Client slices are **assembled**
+from Soft host artifacts (`ghcr.io/qtclient/qtclient-host-*:<sha>`) plus IdleOT
+pack artifacts (`pack-idleot-*:<pack>-host-<sha>`) — no tibia/wasm compile here.
 
 There is **no portal login gate**. Releases match CIP: bounce/restart the game
 world (clients see unreachable / connection-lost), flip
@@ -52,8 +51,6 @@ launcher (`/launcher/tibiametadata.json`).
 - **Manual** — `components` = `all | client | server | portal | launcher |
   server+portal | assets`.
 - **Rollback** — older tag + `skip_build`.
-- **Warm client** — optional `warm-client.yml` (tag release builds missing images).
-
 ## Privacy
 
 This repo is public; the engines are not.
@@ -85,8 +82,8 @@ healthz
 
 | Slice | Image | Built by |
 |-------|-------|----------|
-| WASM | `ghcr.io/idleot/otclient-wasm:<otclient sha>` | `build-client.yml` / `warm-client.yml` |
-| Desktop store | `ghcr.io/idleot/tibia-desktop:<otclient sha>` | same |
+| WASM | `ghcr.io/idleot/otclient-wasm:<qtclient sha>` | `build-client.yml` (wait host+pack, assemble tip) |
+| Desktop store | `ghcr.io/idleot/tibia-desktop:<qtclient sha>` | same |
 | Thin CDN runtime | `ghcr.io/idleot/cdn:runtime-<hash>` | `bundle.yml` (nginx config only) |
 | Assets | `ghcr.io/idleot/cdn-assets` | `publish-assets --push` |
 
