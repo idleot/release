@@ -310,8 +310,17 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/slice"
           bash deploy/pack-tibia-wasm.sh build/tibia-wasm "$RUNNER_TEMP/slice"
+          # pack-tibia-wasm writes .qtclient/wasm.json (CDN schema); keep IdleOT alias for assemble.
+          mkdir -p "$RUNNER_TEMP/slice/.idleot"
+          cp -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" "$RUNNER_TEMP/slice/.idleot/wasm.json"
           test -f "$RUNNER_TEMP/slice/.idleot/wasm.json"
-          test -f "$(find "$RUNNER_TEMP/slice/client" -name tibia.js | head -1)"
+          js="$(find "$RUNNER_TEMP/slice/client" -name tibia.js | head -1 || true)"
+          [[ -n "$js" && -f "$js" ]] || {
+            echo "::error::tibia.js missing under slice/client after pack"
+            find "$RUNNER_TEMP/slice" -maxdepth 5 -type f | head -40 || true
+            find build/tibia-wasm -maxdepth 3 -name 'tibia.*' 2>/dev/null | head -40 || true
+            exit 1
+          }
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -634,11 +643,25 @@ jobs:
 
       - name: Deploy Qt runtime
         shell: bash
+        env:
+          # IdleOT pack brands the stock qtclient host for CDN / Gatekeeper.
+          QTCLIENT_APP_NAME: IdleOT
+          QTCLIENT_BUNDLE_ID: com.idleot.tibia
+          QTCLIENT_STORE_META: .idleot
         run: |
+          # Prefer TOGGLE_BIN_FOLDER bin/; package_desktop also searches the preset root.
+          bin_dir="build/${{ matrix.preset }}/bin"
+          [[ -d "$bin_dir" ]] || bin_dir="build/${{ matrix.preset }}"
           if ! python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
-              --bin "build/${{ matrix.preset }}/bin" --engine-bundle "build/${{ matrix.preset }}/engine" \
+              --bin "$bin_dir" --engine-bundle "build/${{ matrix.preset }}/engine" \
               > "$RUNNER_TEMP/deploy.log" 2>&1; then
-            grep -iE "error|not found|no such" "$RUNNER_TEMP/deploy.log" | cut -c1-300 | tail -n 30; exit 1
+            echo "::group::deploy.log"
+            cat "$RUNNER_TEMP/deploy.log" || true
+            echo "::endgroup::"
+            echo "::group::bin tree"
+            find "build/${{ matrix.preset }}" -maxdepth 5 \( -name client -o -name 'client.exe' -o -name '*.app' -o -type d -name bin \) 2>/dev/null | head -40 || true
+            echo "::endgroup::"
+            exit 1
           fi
           echo "qt runtime deployed ($(wc -l < "$RUNNER_TEMP/deploy.log") lines suppressed)"
 
@@ -705,8 +728,13 @@ jobs:
         shell: bash
         env:
           SOURCE_COMMIT: ${{ env.SHA }}
+          QTCLIENT_APP_NAME: IdleOT
+          QTCLIENT_BUNDLE_ID: com.idleot.tibia
+          QTCLIENT_STORE_META: .idleot
           IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
+          TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
         run: |
           extra=(--engine-files)
           [[ "${{ matrix.platform }}" == linux-x64 ]] && extra+=(--content-files)
@@ -715,14 +743,18 @@ jobs:
           else
             extra+=(--engine-dir "build/${{ matrix.preset }}/engine")
           fi
+          bin_dir="build/${{ matrix.preset }}/bin"
+          [[ -d "$bin_dir" ]] || bin_dir="build/${{ matrix.preset }}"
           python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
-            --bin "build/${{ matrix.preset }}/bin" --out "$RUNNER_TEMP/dist" \
+            --bin "$bin_dir" --out "$RUNNER_TEMP/dist" \
             --revision "${{ needs.check.outputs.revision }}" "${extra[@]}"
 
       - name: Package CIP launcher installer
         shell: bash
         env:
           QT_PREFIX: ${{ env.QT_PREFIX }}
+          QTCLIENT_APP_NAME: IdleOT
+          QTCLIENT_BUNDLE_ID: com.idleot.launcher
         run: |
           # bin/ may be TOGGLE_BIN_FOLDER or the preset root; search both.
           bin_dir="build/${{ matrix.preset }}/bin"
@@ -812,7 +844,16 @@ jobs:
           for d in parts/desktop-*; do
             cp -R "$d/content/." slice/content/
             if [[ -d "$d/packs" ]]; then cp -R "$d/packs/." slice/packs/; fi
-            cp "$d"/.idleot/v3/*.json slice/.idleot/v3/
+            if [[ -d "$d/.idleot/v3" ]]; then
+              cp "$d"/.idleot/v3/*.json slice/.idleot/v3/
+            elif [[ -d "$d/.qtclient/v3" ]]; then
+              # Stock host lists; product assemble path is .idleot.
+              cp "$d"/.qtclient/v3/*.json slice/.idleot/v3/
+            else
+              echo "::error::no v3 lists under $d (.idleot or .qtclient)"
+              find "$d" -maxdepth 3 -type d | head -40
+              exit 1
+            fi
             if [[ -d "$d/installers" ]]; then
               cp -R "$d/installers/." slice/installers/
             fi
