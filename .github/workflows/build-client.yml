@@ -636,7 +636,7 @@ jobs:
         shell: bash
         run: |
           if ! python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
-              --bin "build/${{ matrix.preset }}" --engine-bundle "build/${{ matrix.preset }}/engine" \
+              --bin "build/${{ matrix.preset }}/bin" --engine-bundle "build/${{ matrix.preset }}/engine" \
               > "$RUNNER_TEMP/deploy.log" 2>&1; then
             grep -iE "error|not found|no such" "$RUNNER_TEMP/deploy.log" | cut -c1-300 | tail -n 30; exit 1
           fi
