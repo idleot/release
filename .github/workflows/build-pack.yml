@@ -181,7 +181,7 @@ jobs:
           while IFS= read -r line; do
             echo "$line"
             case "$line" in PACK_DIR=*) PACK_DIR="${line#PACK_DIR=}" ;; esac
-          done < <(bash scripts/lifecycle/package.sh --client-sdk "$sdk")
+          done < <(bash scripts/lifecycle/package/entrypoint.sh --client-sdk "$sdk")
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
           test -f "$RUNNER_TEMP/pack/idleot/mod.json"
@@ -313,7 +313,7 @@ jobs:
           while IFS= read -r line; do
             echo "$line"
             case "$line" in PACK_DIR=*) PACK_DIR="${line#PACK_DIR=}" ;; esac
-          done < <(bash scripts/lifecycle/package.sh --wasm --client-sdk "$sdk")
+          done < <(bash scripts/lifecycle/package/entrypoint.sh --wasm --client-sdk "$sdk")
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
 
