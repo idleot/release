@@ -64,7 +64,7 @@ jobs:
             kit: macos-arm64
             triplet: arm64-osx-static
           - plat: windows-x64
-            runner: windows-latest
+            runner: windows-2022
             kit: windows-x64
             triplet: x64-windows-static-md
     environment: release
@@ -97,36 +97,9 @@ jobs:
 
       - name: Wait + pull Soft host-sdk
         shell: bash
-        run: |
-          set -euo pipefail
-          ref="ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}"
-          mkdir -p "$RUNNER_TEMP/host-sdk"
-          for i in $(seq 1 80); do
-            if (cd "$RUNNER_TEMP/host-sdk" && oras pull "$ref"); then break; fi
-            echo "host-sdk not ready ($i/80)"; sleep 90
-            rm -rf "$RUNNER_TEMP/host-sdk"/* || true
-          done
-          cd "$RUNNER_TEMP/host-sdk"
-          layer="$(find . -type f | head -1 || true)"
-          [[ -n "$layer" ]] && tar -xzf "$layer" 2>/dev/null || true
-          test -f cmake/QtClientMod.cmake -o -f host-sdk.json
-
-      - name: Install Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build ccache libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
-
-      - name: Install macOS deps
-        if: runner.os == 'macOS'
-        run: brew install ninja ccache
-
-      - name: Install Windows deps
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          choco install ccache ninja -y --no-progress
-          echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+        run: bash _qtclient/deploy/ci-pull-host-sdk.sh \
+          "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}" \
+          "$RUNNER_TEMP/host-sdk"
 
       - name: MSVC environment
         if: runner.os == 'Windows'
@@ -140,10 +113,8 @@ jobs:
         working-directory: _qtclient
         run: |
           set -euo pipefail
-          SHA="$(git rev-parse HEAD:third_party/qt5-cip 2>/dev/null || true)"
-          if [[ -z "$SHA" && -f third_party/SUBMODULE_PINS.txt ]]; then
-            SHA="$(awk '/^qt5-cip/{print $2}' third_party/SUBMODULE_PINS.txt)"
-          fi
+          source tools/qt/qt-version.sh
+          SHA="$(qt_resolve_cip_sha)"
           [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
@@ -153,7 +124,7 @@ jobs:
           path: ${{ runner.temp }}/Qt
           key: cip-qt-${{ matrix.kit }}-${{ steps.cip.outputs.sha }}
 
-      - name: Install CIP Qt
+      - name: Soft host bootstrap (deps + vcpkg + CIP Qt)
         shell: bash
         working-directory: _qtclient
         env:
@@ -163,10 +134,7 @@ jobs:
           QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
           QT_PULL_ONLY: '1'
           QT_PULL_WAIT_SECS: '7200'
-        run: |
-          set -euo pipefail
-          bash tools/qt/ci-setup-qt.sh --pull-only
-          echo "QT_PREFIX=$(bash tools/qt/qt-prefix.sh)" >> "$GITHUB_ENV"
+        run: bash tools/qt/ci-setup.sh --pull-only --with-vcpkg --with-deps
 
       - name: Build pack MODULE
         shell: bash
@@ -225,49 +193,39 @@ jobs:
           submodules: false
 
       - uses: oras-project/setup-oras@v1
+      - uses: lukka/get-cmake@v4.3.4
       - name: Login GHCR (oras)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Wait + pull Soft host-sdk
-        run: |
-          set -euo pipefail
-          ref="ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}"
-          mkdir -p "$RUNNER_TEMP/host-sdk"
-          for i in $(seq 1 80); do
-            if (cd "$RUNNER_TEMP/host-sdk" && oras pull "$ref"); then break; fi
-            echo "host-sdk not ready ($i/80)"; sleep 90
-            rm -rf "$RUNNER_TEMP/host-sdk"/* || true
-          done
-          cd "$RUNNER_TEMP/host-sdk"
-          layer="$(find . -type f | head -1 || true)"
-          [[ -n "$layer" ]] && tar -xzf "$layer" 2>/dev/null || true
-          test -f cmake/QtClientMod.cmake -o -f host-sdk.json
-
-      - name: Install deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build ccache libegl1-mesa-dev libfontconfig1-dev libxkbcommon-dev
+        run: bash _qtclient/deploy/ci-pull-host-sdk.sh \
+          "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}" \
+          "$RUNNER_TEMP/host-sdk"
 
       - name: Resolve CIP Qt SHA
         id: cip
         working-directory: _qtclient
         run: |
-          SHA="$(git rev-parse HEAD:third_party/qt5-cip 2>/dev/null || true)"
-          if [[ -z "$SHA" && -f third_party/SUBMODULE_PINS.txt ]]; then
-            SHA="$(awk '/^qt5-cip/{print $2}' third_party/SUBMODULE_PINS.txt)"
-          fi
+          set -euo pipefail
+          source tools/qt/qt-version.sh
+          SHA="$(qt_resolve_cip_sha)"
+          [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Setup vcpkg + CIP Qt wasm
+      - name: Cache Qt wasm
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: cip-qt-wasm_multithread-${{ steps.cip.outputs.sha }}
+
+      - name: Soft host bootstrap (deps + vcpkg + CIP Qt wasm)
         working-directory: _qtclient
         env:
           QT_ROOT: ${{ runner.temp }}/Qt
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GITHUB_ACTOR: ${{ github.repository_owner }}
-        run: |
-          source deploy/ci-setup-vcpkg.sh
-          bash tools/qt/ci-setup-qt.sh --wasm
-          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
+          QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
+        run: bash tools/qt/ci-setup.sh --wasm --with-vcpkg --with-deps
 
       - name: Build SIDE_MODULE pack
         run: |
