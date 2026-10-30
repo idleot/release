@@ -228,6 +228,8 @@ jobs:
 
       - name: Configure tibia wasm
         id: wasm_build
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
         run: |
           summary() {
             echo "::group::error summary ($1)"
