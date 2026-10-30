@@ -28,9 +28,11 @@ resolve -> build missing GHCR images (client/server/portal)
 
 When images are already in GHCR, assemble skips. Client path:
 
-1. **Wait** qtclient host artifacts from public `qtclient` CI (`qtclient-host-*:<sha>`).
+1. **Wait** Soft `client-*` artifacts from public `qtclient` Client:ci
+   (`client-sdk` / `client-wasm` / `client-<plat>:<sha>`).
 2. **Build IdleOT packs on this public repo** (`build-pack.yml`) — checks out
-   private `idleot-client` with `RELEASE_TOKEN` (no private Actions minutes).
+   private `idleot-client` with `RELEASE_TOKEN` and runs
+   `scripts/lifecycle/package.sh --client-sdk` (no private Actions minutes).
 3. **Assemble** tip (merge `mods/idleot`, IdleOT brand) → GHCR slices.
 
 qtclient tibia/wasm is never compiled here.

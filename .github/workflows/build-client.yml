@@ -134,12 +134,12 @@ jobs:
 
           echo "revision=$(date -u +%Y%m%d)-${SHA::7}-${IDLEOT_CLIENT_SHA::7}" >> "$GITHUB_OUTPUT"
 
-          # qtclient host only (public qtclient CI). Packs build on this public repo.
+          # Soft client-* only (public qtclient CI). Packs build on this public repo.
           if [[ "$need_pack" == true ]]; then
-            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${SHA}" 7200 90
-            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" 7200 90
+            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/client-sdk:${SHA}" 7200 90
+            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/client-wasm:${SHA}" 7200 90
             for plat in linux-x64 windows-x64 macos-arm64; do
-              bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-${plat}:${SHA}" 7200 90
+              bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/client-${plat}:${SHA}" 7200 90
             done
           fi
 
@@ -191,22 +191,22 @@ jobs:
           name: pack-idleot-wasm
           path: ${{ runner.temp }}/pack/idleot
 
-      # Soft host is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
-      - name: Pull qtclient host-wasm + merge pack
+      # Soft client-* is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
+      - name: Pull qtclient client-wasm + merge pack
         run: |
           set -euo pipefail
           oras logout ghcr.io 2>/dev/null || true
           bash scripts/pull-oras-dir.sh \
-            "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" "$RUNNER_TEMP/host-wasm"
+            "ghcr.io/${HOST_OWNER}/client-wasm:${SHA}" "$RUNNER_TEMP/client-wasm"
           pack="$RUNNER_TEMP/pack/idleot"
           test -f "$pack/mod.json"
           bash _qtclient/deploy/merge-pack-into-tip.sh \
-            --pack "$pack" --tip "$RUNNER_TEMP/host-wasm" --platform wasm
+            --pack "$pack" --tip "$RUNNER_TEMP/client-wasm" --platform wasm
           mkdir -p "$RUNNER_TEMP/slice"
-          if [[ -d "$RUNNER_TEMP/host-wasm/client" ]]; then
-            cp -a "$RUNNER_TEMP/host-wasm/." "$RUNNER_TEMP/slice/"
+          if [[ -d "$RUNNER_TEMP/client-wasm/client" ]]; then
+            cp -a "$RUNNER_TEMP/client-wasm/." "$RUNNER_TEMP/slice/"
           else
-            bash _qtclient/deploy/pack-tibia-wasm.sh "$RUNNER_TEMP/host-wasm" "$RUNNER_TEMP/slice"
+            bash _qtclient/deploy/pack-tibia-wasm.sh "$RUNNER_TEMP/client-wasm" "$RUNNER_TEMP/slice"
             bash _qtclient/deploy/merge-pack-into-tip.sh \
               --pack "$pack" --tip "$RUNNER_TEMP/slice" --platform wasm
           fi
@@ -296,15 +296,15 @@ jobs:
           name: pack-idleot-${{ matrix.platform }}
           path: ${{ runner.temp }}/pack/idleot
 
-      # Soft host is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
-      - name: Pull qtclient host + merge pack
+      # Soft client-* is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
+      - name: Pull qtclient client tip + merge pack
         shell: bash
         run: |
           set -euo pipefail
           oras logout ghcr.io 2>/dev/null || true
           bash scripts/pull-oras-dir.sh \
-            "ghcr.io/${HOST_OWNER}/qtclient-host-${{ matrix.platform }}:${SHA}" \
-            "$RUNNER_TEMP/host"
+            "ghcr.io/${HOST_OWNER}/client-${{ matrix.platform }}:${SHA}" \
+            "$RUNNER_TEMP/client"
           pack="$RUNNER_TEMP/pack/idleot"
           test -f "$pack/mod.json"
           echo "PACK_DIR=$pack" >> "$GITHUB_ENV"
@@ -312,8 +312,8 @@ jobs:
           mkdir -p _qtclient/client/mods _qtclient/launcher/mods
           cp -a _idleot-client/client _qtclient/client/mods/idleot
           cp -a _idleot-client/launcher _qtclient/launcher/mods/idleot
-          tip="$RUNNER_TEMP/host/engine"
-          [[ -d "$tip" ]] || tip="$RUNNER_TEMP/host"
+          tip="$RUNNER_TEMP/client/engine"
+          [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
           bash _qtclient/deploy/merge-pack-into-tip.sh \
             --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
           echo "ENGINE_TIP=$tip" >> "$GITHUB_ENV"
@@ -425,7 +425,7 @@ jobs:
           else
             extra+=(--engine-dir "${ENGINE_TIP}")
           fi
-          bin_dir="$RUNNER_TEMP/host/bin"
+          bin_dir="$RUNNER_TEMP/client/bin"
           [[ -d "$bin_dir" ]] || bin_dir="$ENGINE_TIP"
           python3 tools/publish/package_desktop.py --platform "${{ matrix.platform }}" \
             --bin "$bin_dir" --out "$RUNNER_TEMP/dist" \
@@ -439,7 +439,7 @@ jobs:
           QTCLIENT_BUNDLE_ID: com.idleot.launcher
         run: |
           set -euo pipefail
-          bin_dir="$RUNNER_TEMP/host/bin"
+          bin_dir="$RUNNER_TEMP/client/bin"
           [[ -d "$bin_dir" ]] || bin_dir="$ENGINE_TIP"
           python3 tools/publish/package_launcher.py \
             --platform "${{ matrix.platform }}" \

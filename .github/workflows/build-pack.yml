@@ -1,11 +1,11 @@
 ---
 # Build IdleOT MODULE/SIDE_MODULE packs on **public** runners (free minutes).
 # Private idleot/idleot-client has no pack compile CI — release checks it out
-# with RELEASE_TOKEN after qtclient host artifacts exist on GHCR.
+# with RELEASE_TOKEN after Soft client-* artifacts exist on GHCR.
 #
-# Compile cache mirrors qtclient host (ci-host.yml): one Actions slot per OS
+# Compile cache mirrors Soft Client:ci: one Actions slot per OS
 # (ccache-pack-linux|macos|windows|wasm), save-always, plus always() artifact.
-# Keys live in this repo — not qtclient host's ccache-host-*.
+# Keys live in this repo — not Soft's ccache-client-*.
 name: Build pack
 
 on:
@@ -101,15 +101,15 @@ jobs:
       - uses: oras-project/setup-oras@v1
       - uses: lukka/get-cmake@v4.3.4
 
-      # Soft host packages are public. Do NOT oras-login with idleot GITHUB_TOKEN
+      # Soft client-* packages are public. Do NOT oras-login with idleot GITHUB_TOKEN
       # first — installation tokens 403 cross-org pulls even when the package is public.
-      - name: Wait + pull qtclient host-sdk
+      - name: Wait + pull qtclient client-sdk
         shell: bash
         run: |
           oras logout ghcr.io 2>/dev/null || true
-          bash _qtclient/deploy/ci-pull-host-sdk.sh \
-            "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}" \
-            "$RUNNER_TEMP/host-sdk"
+          bash _qtclient/deploy/ci-pull-client-sdk.sh \
+            "ghcr.io/${HOST_OWNER}/client-sdk:${{ inputs.qtclient_sha }}" \
+            "$RUNNER_TEMP/client-sdk"
 
       - name: MSVC environment
         if: runner.os == 'Windows'
@@ -170,18 +170,20 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then
             export PATH="/c/ProgramData/chocolatey/bin:/c/tools/zstd:$PATH"
           fi
-          # Soft host-sdk is headers/cmake only — keep _qtclient tools/qt for CIP Qt prefix.
-          sdk="$RUNNER_TEMP/host-sdk"
+          # client-sdk ships cipgen + headers; keep _qtclient tools/qt for CIP Qt prefix.
+          sdk="$RUNNER_TEMP/client-sdk"
           mkdir -p "$sdk/tools"
           rm -rf "$sdk/tools/qt"
           cp -a "$GITHUB_WORKSPACE/_qtclient/tools/qt" "$sdk/tools/qt"
           # CMAKE_PREFIX_PATH also inherits QT_PREFIX from bootstrap when qt-prefix is slow.
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
-          log="$RUNNER_TEMP/build-pack.log"
-          bash deploy/build-pack.sh --host-sdk "$sdk" | tee "$log"
-          pack="$(tail -1 "$log")"
+          PACK_DIR=""
+          while IFS= read -r line; do
+            echo "$line"
+            case "$line" in PACK_DIR=*) PACK_DIR="${line#PACK_DIR=}" ;; esac
+          done < <(bash scripts/lifecycle/package.sh --client-sdk "$sdk")
           mkdir -p "$RUNNER_TEMP/pack"
-          cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
+          cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
           test -f "$RUNNER_TEMP/pack/idleot/mod.json"
 
       - name: Upload pack artifact
@@ -255,13 +257,13 @@ jobs:
       - uses: oras-project/setup-oras@v1
       - uses: lukka/get-cmake@v4.3.4
 
-      # Soft host packages are public — pull anonymously (see pack-desktop note).
-      - name: Wait + pull qtclient host-sdk
+      # Soft client-* packages are public — pull anonymously (see pack-desktop note).
+      - name: Wait + pull qtclient client-sdk
         run: |
           oras logout ghcr.io 2>/dev/null || true
-          bash _qtclient/deploy/ci-pull-host-sdk.sh \
-            "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}" \
-            "$RUNNER_TEMP/host-sdk"
+          bash _qtclient/deploy/ci-pull-client-sdk.sh \
+            "ghcr.io/${HOST_OWNER}/client-sdk:${{ inputs.qtclient_sha }}" \
+            "$RUNNER_TEMP/client-sdk"
 
       - name: Resolve CIP Qt SHA
         id: cip
@@ -301,17 +303,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
-          # host-sdk headers + _qtclient tools/qt (emsdk / CIP Qt wasm) for SIDE_MODULE.
-          sdk="$RUNNER_TEMP/host-sdk"
+          # client-sdk + _qtclient tools/qt (emsdk / CIP Qt wasm) for SIDE_MODULE.
+          sdk="$RUNNER_TEMP/client-sdk"
           mkdir -p "$sdk/tools"
           rm -rf "$sdk/tools/qt"
           cp -a "$GITHUB_WORKSPACE/_qtclient/tools/qt" "$sdk/tools/qt"
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
-          log="$RUNNER_TEMP/build-pack.log"
-          bash deploy/build-pack.sh --wasm --host-sdk "$sdk" | tee "$log"
-          pack="$(tail -1 "$log")"
+          PACK_DIR=""
+          while IFS= read -r line; do
+            echo "$line"
+            case "$line" in PACK_DIR=*) PACK_DIR="${line#PACK_DIR=}" ;; esac
+          done < <(bash scripts/lifecycle/package.sh --wasm --client-sdk "$sdk")
           mkdir -p "$RUNNER_TEMP/pack"
-          cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
+          cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
 
       - name: Upload pack-wasm artifact
         uses: actions/upload-artifact@v4
