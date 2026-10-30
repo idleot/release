@@ -480,6 +480,18 @@ jobs:
           # shellcheck disable=SC1091
           source deploy/ci-setup-vcpkg.sh
 
+      # MSVC must be on PATH before Install CIP Qt — GHCR miss falls back to compiling Qt.
+      - name: Remove Windows pre-installed MySQL
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Remove-Item -Recurse -Force C:\mysql* -ErrorAction SilentlyContinue
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Install CIP Qt
         shell: bash
         env:
@@ -501,17 +513,6 @@ jobs:
             echo "::error::ccache missing on ${{ matrix.platform }} — desktop builds must be cached"
             exit 1
           fi
-
-      - name: Remove Windows pre-installed MySQL
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Remove-Item -Recurse -Force C:\mysql* -ErrorAction SilentlyContinue
-
-      - name: MSVC environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
 
       - name: Configure and build (quiet)
         shell: bash
