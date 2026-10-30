@@ -170,8 +170,16 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then
             export PATH="/c/ProgramData/chocolatey/bin:/c/tools/zstd:$PATH"
           fi
-          export QTCLIENT_ROOT="$GITHUB_WORKSPACE/_qtclient"
-          pack="$(bash deploy/build-pack.sh --qtclient "$QTCLIENT_ROOT" | tail -1)"
+          # Soft host-sdk is headers/cmake only — keep _qtclient tools/qt for CIP Qt prefix.
+          sdk="$RUNNER_TEMP/host-sdk"
+          mkdir -p "$sdk/tools"
+          rm -rf "$sdk/tools/qt"
+          cp -a "$GITHUB_WORKSPACE/_qtclient/tools/qt" "$sdk/tools/qt"
+          # CMAKE_PREFIX_PATH also inherits QT_PREFIX from bootstrap when qt-prefix is slow.
+          export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+          log="$RUNNER_TEMP/build-pack.log"
+          bash deploy/build-pack.sh --host-sdk "$sdk" | tee "$log"
+          pack="$(tail -1 "$log")"
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
           test -f "$RUNNER_TEMP/pack/idleot/mod.json"
@@ -293,8 +301,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
-          export QTCLIENT_ROOT="$GITHUB_WORKSPACE/_qtclient"
-          pack="$(bash deploy/build-pack.sh --wasm --qtclient "$QTCLIENT_ROOT" | tail -1)"
+          # host-sdk headers + _qtclient tools/qt (emsdk / CIP Qt wasm) for SIDE_MODULE.
+          sdk="$RUNNER_TEMP/host-sdk"
+          mkdir -p "$sdk/tools"
+          rm -rf "$sdk/tools/qt"
+          cp -a "$GITHUB_WORKSPACE/_qtclient/tools/qt" "$sdk/tools/qt"
+          export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+          log="$RUNNER_TEMP/build-pack.log"
+          bash deploy/build-pack.sh --wasm --host-sdk "$sdk" | tee "$log"
+          pack="$(tail -1 "$log")"
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
 
