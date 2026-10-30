@@ -1,0 +1,295 @@
+---
+# Build IdleOT MODULE/SIDE_MODULE packs on **public** runners (free minutes).
+# Private idleot/idleot-client has no pack compile CI — release checks it out
+# with RELEASE_TOKEN after Soft host artifacts exist on GHCR.
+name: Build pack
+
+on:
+  workflow_call:
+    inputs:
+      qtclient_sha:
+        type: string
+        required: true
+      idleot_client_sha:
+        type: string
+        required: true
+      build_desktop:
+        type: boolean
+        required: false
+        default: true
+      build_wasm:
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      pack_tag:
+        value: ${{ jobs.meta.outputs.pack_tag }}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  QTCLIENT_REPO: qtclient/qtclient
+  IDLEOT_CLIENT_REPO: ${{ github.repository_owner }}/idleot-client
+  HOST_OWNER: qtclient
+  QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
+
+jobs:
+  meta:
+    name: Pack tag
+    runs-on: ubuntu-latest
+    outputs:
+      pack_tag: ${{ steps.out.outputs.pack_tag }}
+    steps:
+      - id: out
+        run: |
+          echo "pack_tag=${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}" >> "$GITHUB_OUTPUT"
+
+  pack-desktop:
+    name: pack-${{ matrix.plat }}
+    needs: [meta]
+    if: inputs.build_desktop
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plat: linux-x64
+            runner: ubuntu-24.04
+            kit: linux-x64
+            triplet: x64-linux-static
+          - plat: macos-arm64
+            runner: macos-15
+            kit: macos-arm64
+            triplet: arm64-osx-static
+          - plat: windows-x64
+            runner: windows-latest
+            kit: windows-x64
+            triplet: x64-windows-static-md
+    environment: release
+    steps:
+      - name: Checkout idleot-client pack sources
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.IDLEOT_CLIENT_REPO }}
+          ref: ${{ inputs.idleot_client_sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: false
+          submodules: false
+
+      - name: Checkout Soft host tree
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.QTCLIENT_REPO }}
+          ref: ${{ inputs.qtclient_sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          path: _qtclient
+          persist-credentials: false
+          submodules: false
+
+      - uses: oras-project/setup-oras@v1
+      - uses: lukka/get-cmake@v4.3.4
+
+      - name: Login GHCR (oras)
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Wait + pull Soft host-sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}"
+          mkdir -p "$RUNNER_TEMP/host-sdk"
+          for i in $(seq 1 80); do
+            if (cd "$RUNNER_TEMP/host-sdk" && oras pull "$ref"); then break; fi
+            echo "host-sdk not ready ($i/80)"; sleep 90
+            rm -rf "$RUNNER_TEMP/host-sdk"/* || true
+          done
+          cd "$RUNNER_TEMP/host-sdk"
+          layer="$(find . -type f | head -1 || true)"
+          [[ -n "$layer" ]] && tar -xzf "$layer" 2>/dev/null || true
+          test -f cmake/QtClientMod.cmake -o -f host-sdk.json
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build ccache libgl1-mesa-dev libxkbcommon-dev libfontconfig1-dev
+
+      - name: Install macOS deps
+        if: runner.os == 'macOS'
+        run: brew install ninja ccache
+
+      - name: Install Windows deps
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install ccache ninja -y --no-progress
+          echo "/c/ProgramData/chocolatey/bin" >> "$GITHUB_PATH"
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Resolve CIP Qt SHA
+        id: cip
+        shell: bash
+        working-directory: _qtclient
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD:third_party/qt5-cip 2>/dev/null || true)"
+          if [[ -z "$SHA" && -f third_party/SUBMODULE_PINS.txt ]]; then
+            SHA="$(awk '/^qt5-cip/{print $2}' third_party/SUBMODULE_PINS.txt)"
+          fi
+          [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Restore CIP Qt
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: cip-qt-${{ matrix.kit }}-${{ steps.cip.outputs.sha }}
+
+      - name: Install CIP Qt
+        shell: bash
+        working-directory: _qtclient
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_ACTOR: ${{ github.repository_owner }}
+          QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
+          QT_PULL_ONLY: '1'
+          QT_PULL_WAIT_SECS: '7200'
+        run: |
+          set -euo pipefail
+          bash tools/qt/ci-setup-qt.sh --pull-only
+          echo "QT_PREFIX=$(bash tools/qt/qt-prefix.sh)" >> "$GITHUB_ENV"
+
+      - name: Build pack MODULE
+        shell: bash
+        env:
+          VCPKG_TARGET_TRIPLET: ${{ matrix.triplet }}
+        run: |
+          set -euo pipefail
+          export QTCLIENT_ROOT="$GITHUB_WORKSPACE/_qtclient"
+          pack="$(bash deploy/build-pack.sh --qtclient "$QTCLIENT_ROOT" | tail -1)"
+          mkdir -p "$RUNNER_TEMP/pack"
+          cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
+          test -f "$RUNNER_TEMP/pack/idleot/mod.json"
+
+      - name: Upload pack artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-idleot-${{ matrix.plat }}
+          path: ${{ runner.temp }}/pack/idleot
+          retention-days: 2
+          include-hidden-files: true
+
+      - name: Push pack to GHCR (cache for retries)
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          tar -czf pack.tgz -C pack idleot
+          tag="${{ needs.meta.outputs.pack_tag }}"
+          oras push "ghcr.io/${{ github.repository_owner }}/pack-idleot-${{ matrix.plat }}:${tag}" \
+            "pack.tgz:application/vnd.oci.image.layer.v1.tar+gzip"
+
+  pack-wasm:
+    name: pack-wasm
+    needs: [meta]
+    if: inputs.build_wasm
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - name: Checkout idleot-client pack sources
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.IDLEOT_CLIENT_REPO }}
+          ref: ${{ inputs.idleot_client_sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: false
+          submodules: false
+
+      - name: Checkout Soft host tree
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.QTCLIENT_REPO }}
+          ref: ${{ inputs.qtclient_sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          path: _qtclient
+          persist-credentials: false
+          submodules: false
+
+      - uses: oras-project/setup-oras@v1
+      - name: Login GHCR (oras)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Wait + pull Soft host-sdk
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${{ inputs.qtclient_sha }}"
+          mkdir -p "$RUNNER_TEMP/host-sdk"
+          for i in $(seq 1 80); do
+            if (cd "$RUNNER_TEMP/host-sdk" && oras pull "$ref"); then break; fi
+            echo "host-sdk not ready ($i/80)"; sleep 90
+            rm -rf "$RUNNER_TEMP/host-sdk"/* || true
+          done
+          cd "$RUNNER_TEMP/host-sdk"
+          layer="$(find . -type f | head -1 || true)"
+          [[ -n "$layer" ]] && tar -xzf "$layer" 2>/dev/null || true
+          test -f cmake/QtClientMod.cmake -o -f host-sdk.json
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build ccache libegl1-mesa-dev libfontconfig1-dev libxkbcommon-dev
+
+      - name: Resolve CIP Qt SHA
+        id: cip
+        working-directory: _qtclient
+        run: |
+          SHA="$(git rev-parse HEAD:third_party/qt5-cip 2>/dev/null || true)"
+          if [[ -z "$SHA" && -f third_party/SUBMODULE_PINS.txt ]]; then
+            SHA="$(awk '/^qt5-cip/{print $2}' third_party/SUBMODULE_PINS.txt)"
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Setup vcpkg + CIP Qt wasm
+        working-directory: _qtclient
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_ACTOR: ${{ github.repository_owner }}
+        run: |
+          source deploy/ci-setup-vcpkg.sh
+          bash tools/qt/ci-setup-qt.sh --wasm
+          echo "VCPKG_ROOT=$VCPKG_ROOT" >> "$GITHUB_ENV"
+
+      - name: Build SIDE_MODULE pack
+        run: |
+          set -euo pipefail
+          export QTCLIENT_ROOT="$GITHUB_WORKSPACE/_qtclient"
+          pack="$(bash deploy/build-pack.sh --wasm --qtclient "$QTCLIENT_ROOT" | tail -1)"
+          mkdir -p "$RUNNER_TEMP/pack"
+          cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
+
+      - name: Upload pack-wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-idleot-wasm
+          path: ${{ runner.temp }}/pack/idleot
+          retention-days: 2
+          include-hidden-files: true
+
+      - name: Push pack-wasm to GHCR
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          tar -czf pack.tgz -C pack idleot
+          tag="${{ needs.meta.outputs.pack_tag }}"
+          oras push "ghcr.io/${{ github.repository_owner }}/pack-idleot-wasm:${tag}" \
+            "pack.tgz:application/vnd.oci.image.layer.v1.tar+gzip"

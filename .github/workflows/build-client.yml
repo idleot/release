@@ -1,7 +1,9 @@
 ---
-# Assemble release client slices from prebuilt Soft host + IdleOT pack artifacts.
-# Does NOT compile tibia/wasm — waits for qtclient CI host artifacts and
-# idleot-client pack artifacts, merges pack into tip, brands IdleOT, pushes GHCR.
+# Assemble release client slices from Soft host GHCR + IdleOT packs built here.
+# Soft host compiles on public qtclient CI; pack MODULE/SIDE_MODULE compiles on
+# **this public repo** (free minutes) by checking out private idleot-client with
+# RELEASE_TOKEN — never on private idleot-client Actions.
+# Does NOT compile Soft tibia/wasm here.
 #
 # Image names kept for CDN/ACL: otclient-wasm (tibia.js/wasm + mods/idleot),
 # tibia-desktop (Soft tip + pack + installers).
@@ -68,7 +70,7 @@ env:
 
 jobs:
   check:
-    name: Wait host + pack artifacts
+    name: Wait Soft host artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 130
     outputs:
@@ -77,6 +79,7 @@ jobs:
       revision: ${{ steps.exists.outputs.revision }}
       desktop_image: ${{ steps.exists.outputs.desktop_image }}
       pack_tag: ${{ steps.exists.outputs.pack_tag }}
+      need_pack: ${{ steps.exists.outputs.need_pack }}
     steps:
       - name: Checkout release scripts
         uses: actions/checkout@v5
@@ -94,7 +97,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate pins + wait
+      - name: Validate pins + wait Soft host
         id: exists
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
@@ -114,8 +117,8 @@ jobs:
           pack_tag="${IDLEOT_CLIENT_SHA}-host-${SHA}"
           echo "pack_tag=$pack_tag" >> "$GITHUB_OUTPUT"
 
-          # Skip assemble when product slices already exist for this host+pack pair.
-          # Tag remains :<qtclient_sha> for CDN; pack pin is recorded in revision.
+          # Skip assemble when product slices already exist for this host SHA.
+          need_pack=false
           for slice in wasm desktop; do
             image="otclient-wasm"
             [[ "$slice" == desktop ]] && image="$DESKTOP_IMAGE"
@@ -124,28 +127,38 @@ jobs:
               echo "$image:$SHA exists — skip assemble"
             else
               echo "$slice=false" >> "$GITHUB_OUTPUT"
+              need_pack=true
             fi
           done
+          echo "need_pack=$need_pack" >> "$GITHUB_OUTPUT"
 
           echo "revision=$(date -u +%Y%m%d)-${SHA::7}-${IDLEOT_CLIENT_SHA::7}" >> "$GITHUB_OUTPUT"
 
-          # Wait for Soft host + pack artifacts (do not rebuild).
-          bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${SHA}" 7200 90
-          bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" 7200 90
-          for plat in linux-x64 windows-x64 macos-arm64; do
-            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-${plat}:${SHA}" 7200 90
-          done
-          bash scripts/wait-ghcr-artifact.sh \
-            "ghcr.io/${{ github.repository_owner }}/pack-idleot-wasm:${pack_tag}" 7200 90
-          for plat in linux-x64 windows-x64 macos-arm64; do
-            bash scripts/wait-ghcr-artifact.sh \
-              "ghcr.io/${{ github.repository_owner }}/pack-idleot-${plat}:${pack_tag}" 7200 90
-          done
+          # Soft host only (public qtclient CI). Packs build on this public repo.
+          if [[ "$need_pack" == true ]]; then
+            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-sdk:${SHA}" 7200 90
+            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" 7200 90
+            for plat in linux-x64 windows-x64 macos-arm64; do
+              bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/qtclient-host-${plat}:${SHA}" 7200 90
+            done
+          fi
+
+  build-pack:
+    name: Build IdleOT packs (public)
+    needs: [check]
+    if: needs.check.outputs.need_pack == 'true'
+    uses: ./.github/workflows/build-pack.yml
+    secrets: inherit
+    with:
+      qtclient_sha: ${{ inputs.qtclient_sha || inputs.otclient_sha }}
+      idleot_client_sha: ${{ inputs.idleot_client_sha }}
+      build_desktop: ${{ needs.check.outputs.desktop != 'true' }}
+      build_wasm: ${{ needs.check.outputs.wasm != 'true' }}
 
   wasm:
     name: Assemble WASM tip
-    needs: [check]
-    if: needs.check.outputs.wasm != 'true'
+    needs: [check, build-pack]
+    if: always() && needs.check.outputs.wasm != 'true' && needs.build-pack.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: release
@@ -178,21 +191,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull host-wasm + pack
+      - name: Download pack-wasm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pack-idleot-wasm
+          path: ${{ runner.temp }}/pack/idleot
+
+      - name: Pull Soft host-wasm + merge pack
         run: |
           set -euo pipefail
           bash scripts/pull-oras-dir.sh \
             "ghcr.io/${HOST_OWNER}/qtclient-host-wasm:${SHA}" "$RUNNER_TEMP/host-wasm"
-          bash scripts/pull-oras-dir.sh \
-            "ghcr.io/${{ github.repository_owner }}/pack-idleot-wasm:${{ needs.check.outputs.pack_tag }}" \
-            "$RUNNER_TEMP/pack"
-          pack="$RUNNER_TEMP/pack"
-          [[ -f "$pack/mod.json" ]] || pack="$RUNNER_TEMP/pack/idleot"
+          pack="$RUNNER_TEMP/pack/idleot"
           test -f "$pack/mod.json"
           bash _qtclient/deploy/merge-pack-into-tip.sh \
             --pack "$pack" --tip "$RUNNER_TEMP/host-wasm" --platform wasm
           mkdir -p "$RUNNER_TEMP/slice"
-          # Host pack already ran pack-tibia-wasm; copy tip tree into slice.
           if [[ -d "$RUNNER_TEMP/host-wasm/client" ]]; then
             cp -a "$RUNNER_TEMP/host-wasm/." "$RUNNER_TEMP/slice/"
           else
@@ -221,8 +235,8 @@ jobs:
 
   desktop:
     name: Assemble desktop (${{ matrix.platform }})
-    needs: [check]
-    if: needs.check.outputs.desktop != 'true'
+    needs: [check, build-pack]
+    if: always() && needs.check.outputs.desktop != 'true' && needs.build-pack.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -279,25 +293,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull host + pack
+      - name: Download pack artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pack-idleot-${{ matrix.platform }}
+          path: ${{ runner.temp }}/pack/idleot
+
+      - name: Pull Soft host + merge pack
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/pull-oras-dir.sh \
             "ghcr.io/${HOST_OWNER}/qtclient-host-${{ matrix.platform }}:${SHA}" \
             "$RUNNER_TEMP/host"
-          bash scripts/pull-oras-dir.sh \
-            "ghcr.io/${{ github.repository_owner }}/pack-idleot-${{ matrix.platform }}:${{ needs.check.outputs.pack_tag }}" \
-            "$RUNNER_TEMP/pack"
-          pack="$RUNNER_TEMP/pack"
-          [[ -f "$pack/mod.json" ]] || pack="$RUNNER_TEMP/pack/idleot"
+          pack="$RUNNER_TEMP/pack/idleot"
           test -f "$pack/mod.json"
           echo "PACK_DIR=$pack" >> "$GITHUB_ENV"
           # Stage pack sources for brand.cmake / icons discovery in package_desktop.
           mkdir -p _qtclient/client/mods _qtclient/launcher/mods
           cp -a _idleot-client/client _qtclient/client/mods/idleot
           cp -a _idleot-client/launcher _qtclient/launcher/mods/idleot
-          # Merge compiled pack into Soft engine tip.
           tip="$RUNNER_TEMP/host/engine"
           [[ -d "$tip" ]] || tip="$RUNNER_TEMP/host"
           bash _qtclient/deploy/merge-pack-into-tip.sh \
@@ -487,7 +502,7 @@ jobs:
   desktop-publish:
     name: Push ${{ needs.check.outputs.desktop_image }}
     needs: [check, desktop]
-    if: needs.check.outputs.desktop != 'true'
+    if: always() && needs.check.outputs.desktop != 'true' && needs.desktop.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

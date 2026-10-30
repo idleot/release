@@ -26,9 +26,14 @@ resolve -> build missing GHCR images (client/server/portal)
         -> :latest = live, GitHub Release on the umbrella tag
 ```
 
-When images are already in GHCR, assemble skips. Client slices are **assembled**
-from Soft host artifacts (`ghcr.io/qtclient/qtclient-host-*:<sha>`) plus IdleOT
-pack artifacts (`pack-idleot-*:<pack>-host-<sha>`) — no tibia/wasm compile here.
+When images are already in GHCR, assemble skips. Client path:
+
+1. **Wait** Soft host artifacts from public `qtclient` CI (`qtclient-host-*:<sha>`).
+2. **Build IdleOT packs on this public repo** (`build-pack.yml`) — checks out
+   private `idleot-client` with `RELEASE_TOKEN` (no private Actions minutes).
+3. **Assemble** tip (merge `mods/idleot`, IdleOT brand) → GHCR slices.
+
+Soft tibia/wasm is never compiled here.
 
 There is **no portal login gate**. Releases match CIP: bounce/restart the game
 world (clients see unreachable / connection-lost), flip
