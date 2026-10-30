@@ -221,7 +221,9 @@ jobs:
       - name: Install CIP Qt for WebAssembly + emsdk
         env:
           QT_ROOT: ${{ runner.temp }}/Qt
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # RELEASE_TOKEN can read private ghcr.io/qtclient/qt-cip; GITHUB_TOKEN cannot.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_ACTOR: ${{ github.repository_owner }}
         run: bash tools/qt/ci-setup-qt.sh --wasm
 
       - name: Configure tibia wasm
@@ -496,7 +498,9 @@ jobs:
         shell: bash
         env:
           QT_ROOT: ${{ runner.temp }}/Qt
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # RELEASE_TOKEN can read private ghcr.io/qtclient/qt-cip; GITHUB_TOKEN cannot.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_ACTOR: ${{ github.repository_owner }}
         run: |
           if ! bash tools/qt/ci-setup-qt.sh > "$RUNNER_TEMP/qt.log" 2>&1; then
             tail -n 40 "$RUNNER_TEMP/qt.log"; exit 1
