@@ -43,6 +43,8 @@ permissions:
   packages: write
   pages: write
   id-token: write
+  # Nested build-pack cache-save needs Actions cache write (cannot elevate from caller).
+  actions: write
 
 concurrency:
   group: release

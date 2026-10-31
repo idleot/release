@@ -1,0 +1,125 @@
+name: 'CI cache save'
+description: >
+  Save vcpkg binary archives and/or ccache. Actions keys are immutable — skip
+  save on exact hit; always refresh GHCR tip when ghcr_vcpkg is set.
+inputs:
+  kind:
+    description: 'vcpkg | ccache | both'
+    required: false
+    default: both
+  os:
+    description: 'linux | macos | windows | wasm'
+    required: true
+  triplet:
+    description: 'vcpkg triplet'
+    required: false
+    default: ''
+  scope:
+    description: 'ccache product scope'
+    required: false
+    default: client
+  baseline:
+    description: 'vcpkg builtin-baseline (or empty to read vcpkg.json)'
+    required: false
+    default: ''
+  vcpkg_json:
+    required: false
+    default: vcpkg.json
+  ghcr_vcpkg:
+    description: 'GHCR image for shared vcpkg tip; empty = Actions only'
+    required: false
+    default: ''
+  unique:
+    required: false
+    default: ${{ github.sha }}
+  vcpkg_cache_hit:
+    description: 'From cache-restore vcpkg-cache-hit (skip Actions save when true)'
+    required: false
+    default: 'false'
+  ccache_hit:
+    description: 'From cache-restore ccache-hit'
+    required: false
+    default: 'false'
+  token:
+    description: 'GHCR push token (Soft GITHUB_TOKEN)'
+    required: false
+    default: ''
+  actor:
+    required: false
+    default: ${{ github.actor }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve cache paths + keys
+      id: paths
+      shell: bash
+      env:
+        KIND: ${{ inputs.kind }}
+        OS_SLUG: ${{ inputs.os }}
+        TRIPLET: ${{ inputs.triplet }}
+        SCOPE: ${{ inputs.scope }}
+        BASELINE_IN: ${{ inputs.baseline }}
+        VCPKG_JSON: ${{ inputs.vcpkg_json }}
+        UNIQUE: ${{ inputs.unique }}
+      run: |
+        set -euo pipefail
+        # shellcheck source=../cache-common.sh
+        source "${{ github.action_path }}/../cache-common.sh"
+        VCPKG_DIR="${GITHUB_WORKSPACE}/.cache/vcpkg"
+        CCACHE_DIR_PATH="${GITHUB_WORKSPACE}/.cache/ccache"
+        mkdir -p "$VCPKG_DIR" "$CCACHE_DIR_PATH"
+        BASELINE12=""
+        TIP_TAG=""
+        IMM_TAG=""
+        VCPKG_KEY=""
+        if cache_kind_has "$KIND" vcpkg; then
+          [[ -n "$TRIPLET" ]] || { echo "::error::triplet required for vcpkg"; exit 1; }
+          BASELINE12="$(cache_baseline12 "$BASELINE_IN" "$GITHUB_WORKSPACE/$VCPKG_JSON")"
+          VCPKG_KEY="vcpkg-${TRIPLET}-${BASELINE12}-${UNIQUE}"
+          TIP_TAG="${TRIPLET}-${BASELINE12}"
+          IMM_TAG="${TRIPLET}-${BASELINE12}-${UNIQUE:0:12}"
+        fi
+        CCACHE_KEY="ccache-${SCOPE}-${OS_SLUG}-${UNIQUE}"
+        {
+          echo "vcpkg_dir=$VCPKG_DIR"
+          echo "ccache_dir=$CCACHE_DIR_PATH"
+          echo "vcpkg_key=$VCPKG_KEY"
+          echo "ccache_key=$CCACHE_KEY"
+          echo "tip_tag=$TIP_TAG"
+          echo "imm_tag=$IMM_TAG"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Save vcpkg (Actions)
+      if: >
+        (inputs.kind == 'vcpkg' || inputs.kind == 'both') &&
+        inputs.vcpkg_cache_hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.paths.outputs.vcpkg_dir }}
+        key: ${{ steps.paths.outputs.vcpkg_key }}
+
+    - name: Push vcpkg tip to GHCR
+      if: (inputs.kind == 'vcpkg' || inputs.kind == 'both') && inputs.ghcr_vcpkg != ''
+      shell: bash
+      env:
+        GHCR_IMAGE: ${{ inputs.ghcr_vcpkg }}
+        TIP_TAG: ${{ steps.paths.outputs.tip_tag }}
+        IMM_TAG: ${{ steps.paths.outputs.imm_tag }}
+        SRC: ${{ steps.paths.outputs.vcpkg_dir }}
+        TOKEN: ${{ inputs.token }}
+        ACTOR: ${{ inputs.actor }}
+      run: |
+        set -euo pipefail
+        # shellcheck source=../cache-common.sh
+        source "${{ github.action_path }}/../cache-common.sh"
+        cache_oras_push_vcpkg "$GHCR_IMAGE" "$TIP_TAG" "$IMM_TAG" "$SRC" "$TOKEN" "$ACTOR"
+
+    - name: Save ccache (Actions)
+      if: >
+        (inputs.kind == 'ccache' || inputs.kind == 'both') &&
+        inputs.ccache_hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.paths.outputs.ccache_dir }}
+        key: ${{ steps.paths.outputs.ccache_key }}
