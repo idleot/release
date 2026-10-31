@@ -5,8 +5,8 @@
 #
 # Compile/dep cache: same Soft contract via vendored
 # .github/actions/cache-{restore,save} (workspace/.cache/{vcpkg,ccache} + Soft GHCR
-# vcpkg tip). Actions must live in this repo — Soft remote / _qtclient paths break
-# Release workflow startup validation.
+# vcpkg tip). Checkout **this** repo first so local actions stay on disk — packing
+# idleot-client into $GITHUB_WORKSPACE would wipe .github/actions.
 name: Build pack
 
 on:
@@ -80,12 +80,21 @@ jobs:
     env:
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
     steps:
+      # Keep release .github/actions on disk for cache-restore/save.
+      - name: Checkout release (cache actions)
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            .github/actions
+          sparse-checkout-cone-mode: false
+
       - name: Checkout idleot-client pack sources
         uses: actions/checkout@v5
         with:
           repository: ${{ env.IDLEOT_CLIENT_REPO }}
           ref: ${{ inputs.idleot_client_sha }}
           token: ${{ secrets.RELEASE_TOKEN }}
+          path: idleot-client
           persist-credentials: false
           submodules: false
 
@@ -155,6 +164,7 @@ jobs:
 
       - name: Build pack MODULE
         shell: bash
+        working-directory: idleot-client
         env:
           VCPKG_TARGET_TRIPLET: ${{ matrix.triplet }}
         run: |
@@ -244,12 +254,20 @@ jobs:
     env:
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
     steps:
+      - name: Checkout release (cache actions)
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            .github/actions
+          sparse-checkout-cone-mode: false
+
       - name: Checkout idleot-client pack sources
         uses: actions/checkout@v5
         with:
           repository: ${{ env.IDLEOT_CLIENT_REPO }}
           ref: ${{ inputs.idleot_client_sha }}
           token: ${{ secrets.RELEASE_TOKEN }}
+          path: idleot-client
           persist-credentials: false
           submodules: false
 
@@ -308,6 +326,7 @@ jobs:
         run: bash tools/qt/ci-setup.sh --wasm --pull-only --with-vcpkg --with-deps
 
       - name: Build SIDE_MODULE pack
+        working-directory: idleot-client
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
