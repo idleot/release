@@ -3,8 +3,9 @@
 # Private idleot/idleot-client has no pack compile CI — release checks it out
 # with RELEASE_TOKEN after Soft client-* artifacts exist on GHCR.
 #
-# Compile/dep cache: Soft composites (_qtclient/.github/actions/cache-*).
-# ccache scope=pack (Actions, this repo). vcpkg pulls Soft public GHCR tip.
+# Compile cache mirrors Soft Client:ci: one Actions slot per OS
+# (ccache-pack-linux|macos|windows|wasm), save-always, plus always() artifact.
+# Keys live in this repo — not Soft's ccache-client-*.
 name: Build pack
 
 on:
@@ -31,7 +32,6 @@ on:
 permissions:
   contents: read
   packages: write
-  actions: write
 
 env:
   QTCLIENT_REPO: qtclient/qtclient
@@ -76,6 +76,7 @@ jobs:
             os_slug: windows
     environment: release
     env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
     steps:
       - name: Checkout idleot-client pack sources
@@ -127,19 +128,11 @@ jobs:
           [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-      # Remote Soft action — local ./_qtclient/... fails workflow startup validation
-      # (path only exists after checkout). Pin Soft tip that ships the composites.
-      - name: Restore vcpkg + ccache
-        id: cache
-        uses: qtclient/qtclient/.github/actions/cache-restore@0e97c595e31602f9ef0ff7e25595eec0435e1702
+      - name: Restore CIP Qt
+        uses: actions/cache@v4
         with:
-          kind: both
-          os: ${{ matrix.os_slug }}
-          triplet: ${{ matrix.triplet }}
-          scope: pack
-          vcpkg_json: _qtclient/vcpkg.json
-          ghcr_vcpkg: ghcr.io/qtclient/vcpkg-cache
-          unique: ${{ github.sha }}
+          path: ${{ runner.temp }}/Qt
+          key: cip-qt-${{ matrix.kit }}-${{ steps.cip.outputs.sha }}
 
       - name: qtclient host bootstrap (deps + vcpkg + CIP Qt)
         shell: bash
@@ -152,6 +145,17 @@ jobs:
           QT_PULL_ONLY: '1'
           QT_PULL_WAIT_SECS: '7200'
         run: bash tools/qt/ci-setup.sh --pull-only --with-vcpkg --with-deps
+
+      # Own Actions cache slot (release repo) — same pattern as qtclient host
+      # ccache-host-*, not shared across repos.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-pack-${{ matrix.os_slug }}
+          restore-keys: |
+            ccache-pack-${{ matrix.os_slug }}
+          save-always: true
 
       - name: Build pack MODULE
         shell: bash
@@ -181,21 +185,6 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
           test -f "$RUNNER_TEMP/pack/idleot/mod.json"
-
-      - name: Save vcpkg + ccache
-        if: always()
-        uses: qtclient/qtclient/.github/actions/cache-save@0e97c595e31602f9ef0ff7e25595eec0435e1702
-        with:
-          kind: both
-          os: ${{ matrix.os_slug }}
-          triplet: ${{ matrix.triplet }}
-          scope: pack
-          vcpkg_json: _qtclient/vcpkg.json
-          # Pull Soft tip only — Soft Client:ci owns GHCR push.
-          ghcr_vcpkg: ''
-          unique: ${{ github.sha }}
-          vcpkg_cache_hit: ${{ steps.cache.outputs.vcpkg-cache-hit }}
-          ccache_hit: ${{ steps.cache.outputs.ccache-hit }}
 
       - name: Upload pack artifact
         uses: actions/upload-artifact@v4
@@ -243,6 +232,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: release
     env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
     steps:
       - name: Checkout idleot-client pack sources
@@ -285,17 +275,11 @@ jobs:
           [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Restore vcpkg + ccache
-        id: cache
-        uses: qtclient/qtclient/.github/actions/cache-restore@0e97c595e31602f9ef0ff7e25595eec0435e1702
+      - name: Cache Qt wasm
+        uses: actions/cache@v4
         with:
-          kind: both
-          os: wasm
-          triplet: wasm32-emscripten
-          scope: pack
-          vcpkg_json: _qtclient/vcpkg.json
-          ghcr_vcpkg: ghcr.io/qtclient/vcpkg-cache
-          unique: ${{ github.sha }}
+          path: ${{ runner.temp }}/Qt
+          key: cip-qt-wasm_multithread-${{ steps.cip.outputs.sha }}
 
       - name: qtclient host bootstrap (deps + vcpkg + CIP Qt wasm)
         working-directory: _qtclient
@@ -304,7 +288,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GITHUB_ACTOR: ${{ github.repository_owner }}
           QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
-        run: bash tools/qt/ci-setup.sh --wasm --pull-only --with-vcpkg --with-deps
+        run: bash tools/qt/ci-setup.sh --wasm --with-vcpkg --with-deps
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-pack-wasm
+          restore-keys: |
+            ccache-pack-wasm
+          save-always: true
 
       - name: Build SIDE_MODULE pack
         run: |
@@ -323,20 +316,6 @@ jobs:
           done < <(bash scripts/lifecycle/package/module.sh --wasm --client-sdk "$sdk")
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
-
-      - name: Save vcpkg + ccache
-        if: always()
-        uses: qtclient/qtclient/.github/actions/cache-save@0e97c595e31602f9ef0ff7e25595eec0435e1702
-        with:
-          kind: both
-          os: wasm
-          triplet: wasm32-emscripten
-          scope: pack
-          vcpkg_json: _qtclient/vcpkg.json
-          ghcr_vcpkg: ''
-          unique: ${{ github.sha }}
-          vcpkg_cache_hit: ${{ steps.cache.outputs.vcpkg-cache-hit }}
-          ccache_hit: ${{ steps.cache.outputs.ccache-hit }}
 
       - name: Upload pack-wasm artifact
         uses: actions/upload-artifact@v4
