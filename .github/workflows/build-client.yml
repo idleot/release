@@ -201,15 +201,22 @@ jobs:
             "ghcr.io/${HOST_OWNER}/client-wasm:${SHA}" "$RUNNER_TEMP/client-wasm"
           pack="$RUNNER_TEMP/pack/idleot"
           test -f "$pack/mod.json"
-          bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
-            --pack "$pack" --tip "$RUNNER_TEMP/client-wasm" --platform wasm
           mkdir -p "$RUNNER_TEMP/slice"
+          # Soft tip is already CDN-sliced (client/<rev>/wasm/tibia.js). Merge the
+          # pack next to tibia.js so ModLoader sees mods/idleot beside the binary.
           if [[ -d "$RUNNER_TEMP/client-wasm/client" ]]; then
+            js="$(find "$RUNNER_TEMP/client-wasm" -name tibia.js | head -1 || true)"
+            [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing in Soft client-wasm tip"; exit 1; }
+            bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
+              --pack "$pack" --tip "$(dirname "$js")" --platform wasm
             cp -a "$RUNNER_TEMP/client-wasm/." "$RUNNER_TEMP/slice/"
           else
-            bash _qtclient/scripts/lifecycle/package/pack-tibia-wasm.sh "$RUNNER_TEMP/client-wasm" "$RUNNER_TEMP/slice"
+            bash _qtclient/scripts/lifecycle/package/pack-tibia-wasm.sh \
+              "$RUNNER_TEMP/client-wasm" "$RUNNER_TEMP/slice"
+            js="$(find "$RUNNER_TEMP/slice" -name tibia.js | head -1 || true)"
+            [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing after pack-tibia-wasm"; exit 1; }
             bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
-              --pack "$pack" --tip "$RUNNER_TEMP/slice" --platform wasm
+              --pack "$pack" --tip "$(dirname "$js")" --platform wasm
           fi
           mkdir -p "$RUNNER_TEMP/slice/.idleot"
           if [[ -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" ]]; then
@@ -333,7 +340,22 @@ jobs:
           if [[ -z "$SHA" && -f third_party/SUBMODULE_PINS.txt ]]; then
             SHA="$(awk '/^qt5-cip/{print $2}' third_party/SUBMODULE_PINS.txt)"
           fi
-          echo "sha=${SHA:-unknown}" >> "$GITHUB_OUTPUT"
+          [[ -n "$SHA" && "$SHA" != unknown ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      # package_launcher needs macdeployqt / windeployqt / Qt libs (engine tip is
+      # already bundled; --engine-files does not need Qt).
+      - name: Pull CIP Qt (launcher packaging)
+        shell: bash
+        working-directory: _qtclient
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_ACTOR: ${{ github.repository_owner }}
+          QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
+          QT_PULL_ONLY: '1'
+          QT_PULL_WAIT_SECS: '7200'
+        run: bash tools/qt/ci-setup.sh --pull-only
 
       - name: Ad-hoc sign / brand macOS engine
         if: runner.os == 'macOS'
