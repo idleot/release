@@ -167,6 +167,7 @@ jobs:
         working-directory: idleot-client
         env:
           VCPKG_TARGET_TRIPLET: ${{ matrix.triplet }}
+          VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
@@ -181,6 +182,9 @@ jobs:
           mkdir -p "$sdk/tools"
           rm -rf "$sdk/tools/qt"
           cp -a "$GITHUB_WORKSPACE/_qtclient/tools/qt" "$sdk/tools/qt"
+          # Pack cmake from Soft tip (fmt wiring) even when client-sdk is older.
+          mkdir -p "$sdk/cmake"
+          cp -a "$GITHUB_WORKSPACE/_qtclient/cmake/"*.cmake "$sdk/cmake/" 2>/dev/null || true
           # CMAKE_PREFIX_PATH also inherits QT_PREFIX from bootstrap when qt-prefix is slow.
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
           PACK_DIR=""
@@ -327,6 +331,9 @@ jobs:
 
       - name: Build SIDE_MODULE pack
         working-directory: idleot-client
+        env:
+          VCPKG_TARGET_TRIPLET: wasm32-emscripten
+          VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
@@ -335,6 +342,8 @@ jobs:
           mkdir -p "$sdk/tools"
           rm -rf "$sdk/tools/qt"
           cp -a "$GITHUB_WORKSPACE/_qtclient/tools/qt" "$sdk/tools/qt"
+          mkdir -p "$sdk/cmake"
+          cp -a "$GITHUB_WORKSPACE/_qtclient/cmake/"*.cmake "$sdk/cmake/" 2>/dev/null || true
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
           PACK_DIR=""
           while IFS= read -r line; do

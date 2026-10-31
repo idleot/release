@@ -39,6 +39,23 @@ cache_export_env() {
   export CCACHE_DIR="$ccache_dir"
 }
 
+# Git Bash tar treats "D:\…" as host "D" — convert to /d/… for -C.
+cache_unix_path() {
+  local p="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -u "$p"
+    return
+  fi
+  if [[ "$p" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
+    local drive rest
+    drive="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+    rest="${BASH_REMATCH[2]//\\//}"
+    printf '/%s/%s\n' "$drive" "$rest"
+    return
+  fi
+  printf '%s\n' "$p"
+}
+
 # Merge oras-pulled vcpkg archive into dir (never wipe warmer Actions content).
 cache_oras_pull_vcpkg() {
   local image="$1" tip_tag="$2" dest="$3"
@@ -67,9 +84,12 @@ cache_oras_pull_vcpkg() {
     return 0
   fi
   mkdir -p "$dest"
+  local dest_u archive_u
+  dest_u="$(cache_unix_path "$dest")"
+  archive_u="$(cache_unix_path "$archive")"
   case "$archive" in
-    *.zst) tar -C "$dest" -xf "$archive" ;;
-    *) tar -C "$dest" -xzf "$archive" ;;
+    *.zst) zstd -d -c "$archive_u" | tar -C "$dest_u" -xf - ;;
+    *) tar -C "$dest_u" -xzf "$archive_u" ;;
   esac
   echo "[ci-cache] merged GHCR $ref → $dest"
   rm -rf "$tmp"
@@ -92,10 +112,11 @@ cache_oras_push_vcpkg() {
   if [[ -n "$token" ]]; then
     echo "$token" | oras login ghcr.io -u "$actor" --password-stdin || true
   fi
-  local tmp archive
+  local tmp archive src_u
   tmp="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vcpkg-push.XXXXXX")"
   archive="$tmp/vcpkg.tar.zst"
-  tar -C "$src" -cf - . | zstd -T0 -3 -o "$archive"
+  src_u="$(cache_unix_path "$src")"
+  tar -C "$src_u" -cf - . | zstd -T0 -3 -o "$archive"
   local layer=application/vnd.oci.image.layer.v1.tar+zstd
   local art=application/vnd.qtclient.vcpkg.cache.v1+tar
   echo "[ci-cache] pushing $image:$imm_tag"
