@@ -127,9 +127,11 @@ jobs:
           [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
+      # Remote Soft action — local ./_qtclient/... fails workflow startup validation
+      # (path only exists after checkout). Pin Soft tip that ships the composites.
       - name: Restore vcpkg + ccache
         id: cache
-        uses: ./_qtclient/.github/actions/cache-restore
+        uses: qtclient/qtclient/.github/actions/cache-restore@0e97c595e31602f9ef0ff7e25595eec0435e1702
         with:
           kind: both
           os: ${{ matrix.os_slug }}
@@ -182,7 +184,7 @@ jobs:
 
       - name: Save vcpkg + ccache
         if: always()
-        uses: ./_qtclient/.github/actions/cache-save
+        uses: qtclient/qtclient/.github/actions/cache-save@0e97c595e31602f9ef0ff7e25595eec0435e1702
         with:
           kind: both
           os: ${{ matrix.os_slug }}
@@ -285,7 +287,7 @@ jobs:
 
       - name: Restore vcpkg + ccache
         id: cache
-        uses: ./_qtclient/.github/actions/cache-restore
+        uses: qtclient/qtclient/.github/actions/cache-restore@0e97c595e31602f9ef0ff7e25595eec0435e1702
         with:
           kind: both
           os: wasm
@@ -324,7 +326,7 @@ jobs:
 
       - name: Save vcpkg + ccache
         if: always()
-        uses: ./_qtclient/.github/actions/cache-save
+        uses: qtclient/qtclient/.github/actions/cache-save@0e97c595e31602f9ef0ff7e25595eec0435e1702
         with:
           kind: both
           os: wasm
