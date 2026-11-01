@@ -168,6 +168,12 @@ jobs:
         env:
           VCPKG_TARGET_TRIPLET: ${{ matrix.triplet }}
           VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
+          # module.sh stamps mod.json urls.* from these (default keeps :5173).
+          TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
+          IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
+          QTCLIENT_PAYMENTS_URL: ${{ vars.IDLEOT_PAYMENTS_URL || 'https://payments.idleot.com' }}
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
@@ -195,6 +201,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
           test -f "$RUNNER_TEMP/pack/idleot/mod.json"
+          grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json" && {
+            echo "::error::pack mod.json still has 127.0.0.1 — set TIBIA_SITE_URL in pack CI" >&2
+            exit 1
+          }
 
       - name: Save vcpkg + ccache
         if: always()
@@ -334,6 +344,12 @@ jobs:
         env:
           VCPKG_TARGET_TRIPLET: wasm32-emscripten
           VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
+          # module.sh stamps mod.json urls.* from these (default keeps :5173).
+          TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
+          IDLEOT_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
+          QTCLIENT_PAYMENTS_URL: ${{ vars.IDLEOT_PAYMENTS_URL || 'https://payments.idleot.com' }}
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
@@ -352,6 +368,11 @@ jobs:
           done < <(bash scripts/lifecycle/package/module.sh --wasm --client-sdk "$sdk")
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
+          test -f "$RUNNER_TEMP/pack/idleot/mod.json"
+          grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json" && {
+            echo "::error::wasm pack mod.json still has 127.0.0.1 — set TIBIA_SITE_URL in pack CI" >&2
+            exit 1
+          }
 
       - name: Save vcpkg + ccache
         if: always()

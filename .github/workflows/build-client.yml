@@ -224,7 +224,22 @@ jobs:
           fi
           js="$(find "$RUNNER_TEMP/slice" -name tibia.js | head -1 || true)"
           [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing after assemble"; exit 1; }
-          test -d "$(dirname "$js")/mods/idleot"
+          tip="$(dirname "$js")"
+          test -d "$tip/mods/idleot"
+          # Belt-and-suspenders: tip mod.json must not ship local loginBase.
+          SITE="${IDLEOT_SITE_URL:-${TIBIA_SITE_URL:-https://www.idleot.com}}"
+          ASSET="${IDLEOT_ASSET_BASE:-${TIBIA_ASSET_BASE:-https://static.idleot.com}}"
+          PAY="${QTCLIENT_PAYMENTS_URL:-https://payments.idleot.com}"
+          python3 scripts/stamp-mod-urls.py "$tip/mods/idleot/mod.json" \
+            --site "$SITE" --asset "$ASSET" --payments "$PAY"
+          grep -q '127.0.0.1' "$tip/mods/idleot/mod.json" && {
+            echo "::error::tip mod.json still has 127.0.0.1 after stamp" >&2
+            exit 1
+          }
+          (
+            cd "$tip/mods/idleot"
+            find . -type f | sed 's|^\./||' | sort
+          ) >"$tip/mods/idleot.files"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -315,6 +330,11 @@ jobs:
             "$RUNNER_TEMP/client"
           pack="$RUNNER_TEMP/pack/idleot"
           test -f "$pack/mod.json"
+          SITE="${IDLEOT_SITE_URL:-${TIBIA_SITE_URL:-https://www.idleot.com}}"
+          ASSET="${IDLEOT_ASSET_BASE:-${TIBIA_ASSET_BASE:-https://static.idleot.com}}"
+          PAY="${QTCLIENT_PAYMENTS_URL:-https://payments.idleot.com}"
+          python3 scripts/stamp-mod-urls.py "$pack/mod.json" \
+            --site "$SITE" --asset "$ASSET" --payments "$PAY"
           echo "PACK_DIR=$pack" >> "$GITHUB_ENV"
           # Stage pack sources for brand.cmake / icons discovery in package_desktop.
           mkdir -p _qtclient/client/mods _qtclient/launcher/mods
@@ -324,6 +344,10 @@ jobs:
           [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
           bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
             --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
+          grep -q '127.0.0.1' "$tip/mods/idleot/mod.json" && {
+            echo "::error::desktop tip mod.json still has 127.0.0.1 after stamp" >&2
+            exit 1
+          }
           echo "ENGINE_TIP=$tip" >> "$GITHUB_ENV"
 
       - name: Install Linux packaging deps
