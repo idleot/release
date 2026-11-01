@@ -193,6 +193,8 @@ jobs:
           cp -a "$GITHUB_WORKSPACE/_qtclient/cmake/"*.cmake "$sdk/cmake/" 2>/dev/null || true
           # CMAKE_PREFIX_PATH also inherits QT_PREFIX from bootstrap when qt-prefix is slow.
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+          # Ensure module.sh subshell sees production URL stamps.
+          export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
           PACK_DIR=""
           while IFS= read -r line; do
             echo "$line"
@@ -201,10 +203,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
           test -f "$RUNNER_TEMP/pack/idleot/mod.json"
-          grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json" && {
-            echo "::error::pack mod.json still has 127.0.0.1 — set TIBIA_SITE_URL in pack CI" >&2
+          # Belt-and-suspenders: sparse checkout has no scripts/, stamp inline.
+          python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped',u['loginBase'],u['assetBase'])" \
+            "$RUNNER_TEMP/pack/idleot/mod.json" "$TIBIA_SITE_URL" "$TIBIA_ASSET_BASE" "$QTCLIENT_PAYMENTS_URL"
+          if grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json"; then
+            echo "::error::pack mod.json still has 127.0.0.1 after stamp" >&2
+            cat "$RUNNER_TEMP/pack/idleot/mod.json" >&2
             exit 1
-          }
+          fi
 
       - name: Save vcpkg + ccache
         if: always()
@@ -361,6 +367,7 @@ jobs:
           mkdir -p "$sdk/cmake"
           cp -a "$GITHUB_WORKSPACE/_qtclient/cmake/"*.cmake "$sdk/cmake/" 2>/dev/null || true
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+          export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
           PACK_DIR=""
           while IFS= read -r line; do
             echo "$line"
@@ -369,10 +376,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pack"
           cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
           test -f "$RUNNER_TEMP/pack/idleot/mod.json"
-          grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json" && {
-            echo "::error::wasm pack mod.json still has 127.0.0.1 — set TIBIA_SITE_URL in pack CI" >&2
+          python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped',u['loginBase'],u['assetBase'])" \
+            "$RUNNER_TEMP/pack/idleot/mod.json" "$TIBIA_SITE_URL" "$TIBIA_ASSET_BASE" "$QTCLIENT_PAYMENTS_URL"
+          if grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json"; then
+            echo "::error::wasm pack mod.json still has 127.0.0.1 after stamp" >&2
+            cat "$RUNNER_TEMP/pack/idleot/mod.json" >&2
             exit 1
-          }
+          fi
 
       - name: Save vcpkg + ccache
         if: always()
