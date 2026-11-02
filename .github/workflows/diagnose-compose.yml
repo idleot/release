@@ -5,11 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       service:
-        description: "compose service via deployctl (portal|server|cdn|metrics)"
+        description: "compose service (portal|server|cdn|metrics|mariadb|…)"
         required: true
         default: portal
-        type: choice
-        options: [portal, server, cdn, metrics]
+        type: string
       lines:
         description: "docker compose logs --tail"
         required: false
