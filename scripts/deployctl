@@ -205,10 +205,15 @@ EOF
       remote_q="$(printf %q "$REMOTE_DIR")"
       snippet="${1:?deployctl remote needs a bash snippet}"
       b64="$(printf '%s' "$snippet" | base64 | tr -d '\n')"
+      # Write to a temp file — `base64 -d | bash -s` lets `docker compose exec`
+      # steal the rest of the script from stdin (dump never ran, exit 0).
       compose_ssh "bash -s" <<EOF
 set -euo pipefail
 cd $remote_q
-echo '$b64' | base64 -d | bash -s
+tmp=\$(mktemp)
+trap 'rm -f "\$tmp"' EXIT
+echo '$b64' | base64 -d > "\$tmp"
+bash "\$tmp"
 EOF
       ;;
     *) echo "deployctl compose-ssh: unknown cmd $cmd" >&2; exit 2 ;;
