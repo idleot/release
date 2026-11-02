@@ -28,4 +28,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: run
-        run: bash scripts/deployctl remote "${{ inputs.command }}"
+        env:
+          # Env keeps $vars literal; embedding inputs.command in the shell
+          # line would expand ${VOL} etc. on the runner before SSH.
+          REMOTE_CMD: ${{ inputs.command }}
+        run: bash scripts/deployctl remote "$REMOTE_CMD"
