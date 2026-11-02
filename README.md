@@ -6,36 +6,41 @@ cost no Actions minutes. Engine source stays in private repos.
 
 ## Cutting a release
 
-**One step:** push submodule pins, then tag. Release builds any missing GHCR
-images (client / server / portal) and promotes.
+**One step:** push submodule pins, then tag. Every tag is an **atomic full cut**
+(`components=all`): Soft host + IdleOT packs + server + portal build, then one
+promote. Release does **not** depend on Soft `main` already having published
+the Soft pin — it dispatches Soft `Client:ci` at that SHA when host ORAS is
+missing.
 
 ```bash
-# After pushing otclient / crystalserver / portal SHAs that will be tagged:
-git tag -a v1.4.0 -m "notes [release:all]"   # [release:all] optional
+# After pushing Soft / crystalserver / portal / idleot-client pins:
+git tag -a v1.4.0 -m "notes"
 git push origin v1.4.0
 ```
 
-`idleot/idleot` `tag-release.yml` dispatches **Release** here with `ref=v1.4.0`
-and `build_if_missing=true`.
+`idleot/idleot` `tag-release.yml` dispatches **Release** with `ref=v1.4.0`,
+`components=all`, and `build_if_missing=true`.
 
 ```
-resolve -> build missing GHCR images (client/server/portal)
-        -> bundle      (assemble site; push thin nginx runtime; artifact site/)
-        -> record-live (compose image tags for rollback)
-        -> deploy server (when changed) → CDN tip flip → portal | Pages
-        -> :latest = live, GitHub Release on the umbrella tag
+resolve (all components)
+  -> Soft host dispatch ‖ server image ‖ portal image
+  -> IdleOT packs (after Soft ORAS) -> assemble tips (Soft+pack tag)
+  -> bundle -> verify -> record-live
+  -> deploy server → CDN tip flip → portal | Pages
+  -> :latest = live, GitHub Release on the umbrella tag
 ```
 
-When images are already in GHCR, assemble skips. Client path:
+Client path:
 
-1. **Wait** Soft `client-*` artifacts from public `qtclient` Client:ci
-   (`client-sdk` / `client-wasm` / `client-<plat>:<sha>`).
-2. **Build IdleOT packs on this public repo** (`build-pack.yml`) — checks out
-   private `idleot-client` with `RELEASE_TOKEN` and runs
-   `scripts/lifecycle/package/module.sh --client-sdk` (no private Actions minutes).
-3. **Assemble** tip (merge `mods/idleot`, IdleOT brand) → GHCR slices.
+1. **Ensure Soft host** — `scripts/ensure-soft-host.sh` dispatches public
+   `qtclient` `Client:ci` at the Soft pin when `client-*` ORAS is missing, then
+   waits for `client-sdk` / `client-wasm` / `client-<plat>:<sha>`.
+2. **Build IdleOT packs** on this public repo (`build-pack.yml`) — checks out
+   private `idleot-client` with `RELEASE_TOKEN`.
+3. **Assemble** tip (merge `mods/idleot`) → GHCR slices tagged
+   `${idleot_client_sha}-host-${qtclient_sha}` (and aliased to `:${qtclient_sha}`).
 
-qtclient tibia/wasm is never compiled here.
+qtclient tibia/wasm is never compiled in this repo (only on Soft).
 
 There is **no portal login gate**. Releases match CIP: bounce/restart the game
 world (clients see unreachable / connection-lost), flip
@@ -53,11 +58,19 @@ launcher (`/launcher/tibiametadata.json`).
 - **Auto rollback** — restores server/portal tags and `sync-cdn.sh rollback`
   for `latest/` on the volume.
 
-- **auto** — a component ships when its submodule pointer changed since the
-  previous `v*` tag. Add `[release:all]` to force everything.
-- **Manual** — `components` = `all | client | server | portal | launcher |
-  server+portal | assets`.
+- **Tag cuts** — always `components=all` (server + clients + portal together).
+- **Manual** — `components` = `auto | all | client | server | portal |
+  launcher | server+portal | assets` (`auto` = pin-diff since previous `v*`).
 - **Rollback** — older tag + `skip_build`.
+
+### Speed (no warm dependency)
+
+Wall-clock is `max(Soft full matrix, server, portal) + packs + assemble +
+promote`. Soft wasm is usually the long pole. Optional: self-hosted Linux
+runners with persistent ccache/Qt for Soft wasm + `pack-wasm` (label via Soft /
+Release `runs-on`; do not put builders on the game host). Compile caches speed
+jobs; Release never assumes Soft main already published the pin.
+
 ## Privacy
 
 This repo is public; the engines are not.
@@ -89,8 +102,8 @@ healthz
 
 | Slice | Image | Built by |
 |-------|-------|----------|
-| WASM | `ghcr.io/idleot/otclient-wasm:<qtclient sha>` | `build-client.yml` (wait host+pack, assemble tip) |
-| Desktop store | `ghcr.io/idleot/tibia-desktop:<qtclient sha>` | same |
+| WASM | `ghcr.io/idleot/otclient-wasm:<pack>-host-<soft>` (+ Soft SHA alias) | `build-client.yml` (ensure Soft host + pack, assemble tip) |
+| Desktop store | `ghcr.io/idleot/tibia-desktop:<pack>-host-<soft>` (+ Soft SHA alias) | same |
 | Thin CDN runtime | `ghcr.io/idleot/cdn:runtime-<hash>` | `bundle.yml` (nginx config only) |
 | Assets | `ghcr.io/idleot/cdn-assets` | `publish-assets --push` |
 

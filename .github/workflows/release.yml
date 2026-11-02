@@ -1,19 +1,21 @@
 ---
 # Release orchestrator. An idleot/idleot tag (v*) dispatches this with the tag
-# as `ref`; the umbrella's submodule pointers decide what ships.
+# as `ref`; the umbrella's submodule pointers are the pins.
 #
-#   resolve -> build missing GHCR images (default) OR require warm tags
-#           -> bundle site tree + thin CDN runtime (exact slice tags)
-#           -> record live Coolify tags (for rollback)
-#           -> deploy server (when changed), then CDN flip + portal/pages
+# Tag cuts use components=all (atomic): Soft host + packs + server + portal
+# build in parallel, then one promote. Soft host is Release-owned via
+# ensure-soft-host.sh (dispatches qtclient Client:ci at the Soft pin) — no
+# Soft-main warm dependency.
+#
+#   resolve -> Soft host ‖ server ‖ portal ‖ (packs after Soft)
+#           -> assemble tips (Soft+pack identity) -> bundle
+#           -> record live -> deploy server → CDN flip → portal (atomic gate)
 #           -> (any failure: roll apps back, restore previous latest/)
 #           -> move :latest to what is live, GitHub Release on the umbrella tag
-#   No portal login gate — CIP-like: restart/unreachable during the flip.
 #
 # components: auto | all | client | server | portal | launcher | server+portal | assets
 # skip_build: redeploy existing images only (rollback)
-# build_if_missing: compile on the release path when :<sha> is absent (default true;
-#   tag-release always passes true so warm is not a separate step)
+# build_if_missing: build on the release path when images absent (tag-release: true)
 name: Release
 
 run-name: Release ${{ inputs.ref }} (${{ inputs.components }}${{ inputs.skip_build && ', no build' || '' }}${{ inputs.build_if_missing && ', build if missing' || '' }})
@@ -97,7 +99,7 @@ jobs:
           { echo "### Release ${REF}"; echo '```'; cat "$RUNNER_TEMP/resolve.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   require-images:
-    name: Require warm images
+    name: Require existing images
     needs: [resolve]
     if: needs.resolve.outputs.require_images == 'true' && (needs.resolve.outputs.client == 'true' || needs.resolve.outputs.server == 'true')
     runs-on: ubuntu-latest
@@ -111,11 +113,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Check :<sha> tags exist
+      - name: Check tip / image tags exist
         env:
           CLIENT: ${{ needs.resolve.outputs.client }}
           SERVER: ${{ needs.resolve.outputs.server }}
           OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
+          IDLEOT_CLIENT_SHA: ${{ needs.resolve.outputs.idleot_client_sha }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
         run: bash scripts/require-images.sh
 
@@ -182,19 +185,77 @@ jobs:
     uses: ./.github/workflows/bundle.yml
     secrets: inherit
     with:
-      wasm_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
-      desktop_tag: ${{ needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha || 'latest' }}
+      # Prefer Soft+pack tip tag from assemble; alias :qtclient_sha also pushed.
+      wasm_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha) || 'latest' }}
+      desktop_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha) || 'latest' }}
       desktop_image: ${{ needs.build-client.outputs.desktop_image }}
       launcher_tag: ${{ needs.build-launcher.outputs.version || 'latest' }}
       release_id: ${{ needs.resolve.outputs.release_id }}
       publish_pages: false
 
+  verify:
+    name: Verify release artifacts
+    needs: [resolve, build-client, build-server, build-portal, bundle]
+    if: >-
+      always() && needs.bundle.result == 'success' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: true
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check pins and tip identity
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          CLIENT: ${{ needs.resolve.outputs.client }}
+          SERVER: ${{ needs.resolve.outputs.server }}
+          OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
+          PACK_SHA: ${{ needs.resolve.outputs.idleot_client_sha }}
+          TIP_TAG: ${{ needs.build-client.outputs.tip_tag }}
+          CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
+          DESKTOP_IMAGE: ${{ needs.build-client.outputs.desktop_image || 'tibia-desktop' }}
+        run: |
+          set -euo pipefail
+          miss=0
+          need() {
+            local ref=$1
+            if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+              echo "[verify] ok $ref"
+            else
+              echo "::error::missing $ref"; miss=1
+            fi
+          }
+          if [[ "$CLIENT" == true ]]; then
+            tag="${TIP_TAG:-${PACK_SHA}-host-${OTC_SHA}}"
+            need "$REGISTRY/otclient-wasm:$tag"
+            need "$REGISTRY/$DESKTOP_IMAGE:$tag"
+            echo "### Client tip" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Soft \`${OTC_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- pack \`${PACK_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- tip tag \`${tag}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "$SERVER" == true ]]; then
+            need "$REGISTRY/crystalserver:$CRYSTAL_SHA"
+          fi
+          exit "$miss"
+
   record-live:
     name: Record live tags
-    needs: [resolve, require-images, build-client, build-launcher, build-server, build-portal, bundle]
+    needs: [resolve, require-images, build-client, build-launcher, build-server, build-portal, bundle, verify]
     if: >-
       always() && needs.resolve.result == 'success' &&
       (needs.require-images.result == 'success' || needs.require-images.result == 'skipped') &&
+      (needs.verify.result == 'success' || needs.verify.result == 'skipped') &&
       !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 10
