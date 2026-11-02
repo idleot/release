@@ -90,7 +90,9 @@ else
 fi
 export $key_q=$tag_q
 docker compose pull $svc_q
-docker compose up -d $svc_q
+# Same-tag re-promote must recreate: compose otherwise leaves a stuck
+# "Running" container (www 502) untouched.
+docker compose up -d --force-recreate --no-deps $svc_q
 # Crystal is IPv4-only; re-pin Traefik game-ws after server recreate.
 if [[ $svc_q == server ]]; then
   if [[ -x ./pin-game-ws.sh ]]; then bash ./pin-game-ws.sh || true; fi
@@ -101,7 +103,7 @@ EOF
 set -euo pipefail
 cd $remote_q
 docker compose pull $svc_q
-docker compose up -d $svc_q
+docker compose up -d --force-recreate --no-deps $svc_q
 if [[ $svc_q == server ]]; then
   if [[ -x ./pin-game-ws.sh ]]; then bash ./pin-game-ws.sh || true; fi
 fi

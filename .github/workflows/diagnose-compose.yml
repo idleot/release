@@ -1,0 +1,38 @@
+# One-shot compose-ssh diagnose (portal/server/cdn). No promote.
+name: Diagnose compose
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "compose service via deployctl (portal|server|cdn|metrics)"
+        required: true
+        default: portal
+        type: choice
+        options: [portal, server, cdn, metrics]
+      lines:
+        description: "docker compose logs --tail"
+        required: false
+        default: "300"
+        type: string
+
+concurrency:
+  group: diagnose-compose
+  cancel-in-progress: true
+
+jobs:
+  logs:
+    name: Logs ${{ inputs.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release
+    env:
+      IDLEOT_DEPLOY_BACKEND: compose-ssh
+      CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+      CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+      CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
+      COMPOSE_REMOTE_DIR: ${{ vars.COMPOSE_REMOTE_DIR || '/opt/idleot/stack' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: dump ${{ inputs.service }}
+        run: bash scripts/deployctl logs "${{ inputs.service }}" "${{ inputs.lines }}"

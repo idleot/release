@@ -377,6 +377,9 @@ jobs:
       - uses: actions/checkout@v5
       - name: Point compose portal at portal:${{ env.SHA }}
         run: bash scripts/deployctl deploy portal "$SHA"
+      - name: Portal compose state
+        if: always()
+        run: bash scripts/deployctl logs portal 120 || true
       - name: Wait for the site
         run: |
           for _ in $(seq 1 30); do
