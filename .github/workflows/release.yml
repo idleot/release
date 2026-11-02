@@ -383,7 +383,9 @@ jobs:
             curl -fsS -o /dev/null "$SITE_URL/" && { echo "site up"; exit 0; }
             sleep 10
           done
-          echo "::error::site did not come back"; exit 1
+          echo "::error::site did not come back — dumping portal compose state"
+          bash scripts/deployctl logs portal 300 || true
+          exit 1
 
   deploy-pages:
     name: Deploy GitHub Pages

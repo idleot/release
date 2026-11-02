@@ -165,6 +165,27 @@ cd $remote_q
 grep -E '^'"$key_q"'=' .env 2>/dev/null | head -1 | cut -d= -f2- || true
 EOF
       ;;
+    logs)
+      app="$1"
+      lines="${2:-200}"
+      svc="$(compose_service "$app")"
+      remote_q="$(printf %q "$REMOTE_DIR")"
+      svc_q="$(printf %q "$svc")"
+      lines_q="$(printf %q "$lines")"
+      compose_ssh "bash -s" <<EOF
+set -euo pipefail
+cd $remote_q
+echo "=== docker compose ps $svc_q ==="
+docker compose ps $svc_q || true
+echo "=== docker compose logs --tail $lines_q $svc_q ==="
+docker compose logs --tail $lines_q $svc_q || true
+echo "=== docker inspect health/state ==="
+id=\$(docker compose ps -q $svc_q 2>/dev/null | head -1 || true)
+if [[ -n "\$id" ]]; then
+  docker inspect "\$id" --format 'status={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}} OOM={{.State.OOMKilled}} restarts={{.RestartCount}}'
+fi
+EOF
+      ;;
     *) echo "deployctl compose-ssh: unknown cmd $cmd" >&2; exit 2 ;;
   esac
   exit 0
