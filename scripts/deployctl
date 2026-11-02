@@ -198,6 +198,16 @@ else
 fi
 EOF
       ;;
+    remote)
+      # Run an arbitrary bash snippet under COMPOSE_REMOTE_DIR.
+      remote_q="$(printf %q "$REMOTE_DIR")"
+      snippet="${1:?deployctl remote needs a bash snippet}"
+      compose_ssh "bash -s" <<EOF
+set -euo pipefail
+cd $remote_q
+$snippet
+EOF
+      ;;
     *) echo "deployctl compose-ssh: unknown cmd $cmd" >&2; exit 2 ;;
   esac
   exit 0

@@ -16,7 +16,7 @@ on:
         type: string
 
 concurrency:
-  group: diagnose-compose
+  group: diagnose-compose-${{ inputs.service }}
   cancel-in-progress: true
 
 jobs:

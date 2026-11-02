@@ -1,0 +1,31 @@
+# One-shot remote compose command (compose-ssh). Prefer read-only diagnose first.
+name: Compose exec
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "bash snippet run under COMPOSE_REMOTE_DIR (via deployctl remote)"
+        required: true
+        type: string
+
+concurrency:
+  group: compose-exec
+  cancel-in-progress: false
+
+jobs:
+  exec:
+    name: Remote compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    env:
+      IDLEOT_DEPLOY_BACKEND: compose-ssh
+      CDN_SSH_HOST: ${{ secrets.CDN_SSH_HOST }}
+      CDN_SSH_USER: ${{ secrets.CDN_SSH_USER }}
+      CDN_SSH_KEY: ${{ secrets.CDN_SSH_KEY }}
+      COMPOSE_REMOTE_DIR: ${{ vars.COMPOSE_REMOTE_DIR || '/opt/idleot/stack' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: run
+        run: bash scripts/deployctl remote "${{ inputs.command }}"
