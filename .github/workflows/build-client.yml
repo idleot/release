@@ -253,6 +253,8 @@ jobs:
             echo "::error::tip mod.json still has 127.0.0.1 after stamp" >&2
             exit 1
           }
+          # ModLoader requires non-empty id (+ API); launcher brand must not clobber pack meta.
+          python3 scripts/assert-tip-mod-json.py "$tip/mods/idleot/mod.json"
           # Tip mods stamp (content hash of staged pack) for Soft modsversionurl.
           python3 scripts/emit-mods-stamp.py "$tip/mods/idleot" "$tip"
           (
@@ -367,15 +369,29 @@ jobs:
             --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
           bash _qtclient/scripts/lifecycle/lib/merge-launcher-brand.sh \
             --pack "_idleot-client/launcher" --tip "$tip"
-          test -f "$tip/mods/idleot/brand.json" || {
+          # Soft resolves engine root → Contents/MacOS; locate the pack for asserts.
+          pack_tip="$tip/mods/idleot"
+          if [[ ! -f "$pack_tip/mod.json" ]]; then
+            macos="$(find "$tip" -maxdepth 3 -path '*/Contents/MacOS/mods/idleot/mod.json' | head -1 || true)"
+            [[ -n "$macos" ]] && pack_tip="$(dirname "$macos")"
+          fi
+          test -f "$pack_tip/brand.json" || {
             echo "::error::desktop tip mods/idleot/brand.json missing" >&2
             exit 1
           }
-          python3 scripts/emit-mods-stamp.py "$tip/mods/idleot" "$tip"
-          grep -q '127.0.0.1' "$tip/mods/idleot/mod.json" && {
+          python3 scripts/assert-tip-mod-json.py "$pack_tip/mod.json"
+          python3 scripts/emit-mods-stamp.py "$pack_tip" "$(dirname "$(dirname "$pack_tip")")"
+          grep -q '127.0.0.1' "$pack_tip/mod.json" && {
             echo "::error::desktop tip mod.json still has 127.0.0.1 after stamp" >&2
             exit 1
           }
+          # macOS: pack must sit next to the Play binary (ModLoader tip root).
+          if [[ "${{ matrix.platform }}" == macos-arm64 ]]; then
+            [[ "$pack_tip" == */Contents/MacOS/mods/idleot ]] || {
+              echo "::error::macOS pack not under Contents/MacOS/mods/idleot ($pack_tip)" >&2
+              exit 1
+            }
+          fi
           echo "ENGINE_TIP=$tip" >> "$GITHUB_ENV"
 
       - name: Install Linux packaging deps
