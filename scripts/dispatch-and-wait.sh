@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Dispatch a workflow in a (private) engine repo and wait for it.
+# Dispatch a workflow and wait for it.
 # Usage: dispatch-and-wait.sh <owner/repo> <workflow-file> <release_id> [key=value ...]
+#
+# Env:
+#   DISPATCH_REF   git ref to run (default: main). Soft host publish uses the
+#                  umbrella Soft pin SHA so Release never depends on Soft main.
 #
 # The run is found by its run-name, which must contain the release_id. Only the
 # final conclusion is printed: this runs in a public repo, so step names and
-# logs of the private run stay out of these logs.
+# logs of private engine runs stay out of these logs.
 set -euo pipefail
 
 REPO="$1"
@@ -12,11 +16,13 @@ WORKFLOW="$2"
 RELEASE_ID="$3"
 shift 3
 
+REF="${DISPATCH_REF:-main}"
+
 fields=(-f "release_id=${RELEASE_ID}")
 for kv in "$@"; do fields+=(-f "$kv"); done
 
-gh workflow run "$WORKFLOW" -R "$REPO" --ref main "${fields[@]}" >/dev/null
-echo "[dispatch] ${REPO##*/} ${WORKFLOW} (${RELEASE_ID})"
+gh workflow run "$WORKFLOW" -R "$REPO" --ref "$REF" "${fields[@]}" >/dev/null
+echo "[dispatch] ${REPO##*/} ${WORKFLOW} @ ${REF} (${RELEASE_ID})"
 
 run_id=""
 for _ in $(seq 1 36); do

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Fail fast when release pins lack GHCR images (warm builds should have pushed them).
-# Env: REGISTRY, and any of OTC_SHA / CRYSTAL_SHA / PORTAL_SHA / CLIENT / SERVER / PORTAL
-#      (CLIENT/SERVER/PORTAL are "true"/"false"; only check when true).
-# DESKTOP_IMAGE defaults to tibia-desktop.
+# Fail fast when release pins lack GHCR images (require_images path only).
+# Env: REGISTRY, OTC_SHA, optional IDLEOT_CLIENT_SHA / TIP_TAG, CRYSTAL_SHA,
+#      CLIENT/SERVER/PORTAL ("true"/"false"). DESKTOP_IMAGE defaults to tibia-desktop.
+# Client tips are Soft+pack: prefer TIP_TAG or ${IDLEOT_CLIENT_SHA}-host-${OTC_SHA}.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:?}"
@@ -14,15 +14,20 @@ need() {
   if docker buildx imagetools inspect "${REGISTRY}/${image}:${tag}" >/dev/null 2>&1; then
     echo "[ok] ${image}:${tag}"
   else
-    echo "::error::missing ${REGISTRY}/${image}:${tag} (${label}) — build it first (warm workflow) or pass build_if_missing=true"
+    echo "::error::missing ${REGISTRY}/${image}:${tag} (${label}) — pass build_if_missing=true so Release builds them"
     missing=1
   fi
 }
 
 if [[ "${CLIENT:-false}" == "true" ]]; then
   : "${OTC_SHA:?}"
-  need otclient-wasm "$OTC_SHA" "client wasm"
-  need "$DESKTOP_IMAGE" "$OTC_SHA" "client desktop"
+  tip="${TIP_TAG:-}"
+  if [[ -z "$tip" && -n "${IDLEOT_CLIENT_SHA:-}" ]]; then
+    tip="${IDLEOT_CLIENT_SHA}-host-${OTC_SHA}"
+  fi
+  tip="${tip:-$OTC_SHA}"
+  need otclient-wasm "$tip" "client wasm tip"
+  need "$DESKTOP_IMAGE" "$tip" "client desktop tip"
 fi
 if [[ "${SERVER:-false}" == "true" ]]; then
   : "${CRYSTAL_SHA:?}"

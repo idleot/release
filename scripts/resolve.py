@@ -16,9 +16,10 @@ Env:
   OWNER        GitHub org (idleot)
   REF          umbrella tag or commit
   COMPONENTS        auto | all | client | server | portal | launcher | server+portal | assets
+                    (umbrella tag-release always passes all for atomic full cuts)
   SKIP_BUILD        true to redeploy existing images only
-  BUILD_IF_MISSING  true to compile when GHCR tags are absent (default false —
-                    release fails fast; warm builds should have pushed :<sha>)
+  BUILD_IF_MISSING  true to build when GHCR tags are absent (tag-release: true;
+                    Soft host is dispatched by Release, not assumed warm)
 
 Writes key=value lines to $GITHUB_OUTPUT (and stdout).
 """

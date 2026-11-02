@@ -1,12 +1,12 @@
 ---
 # Assemble release client slices from qtclient host GHCR + IdleOT packs built here.
-# qtclient host compiles on public qtclient CI; pack MODULE/SIDE_MODULE compiles on
-# **this public repo** (free minutes) by checking out private idleot-client with
-# RELEASE_TOKEN — never on private idleot-client Actions.
+# Soft host is Release-owned: ensure-soft-host.sh dispatches qtclient Client:ci at
+# the pin SHA when client-* ORAS is missing (no Soft-main warm dependency).
+# Pack MODULE/SIDE_MODULE compiles on this public repo (free minutes).
 # Does NOT compile qtclient tibia/wasm here.
 #
-# Image names kept for CDN/ACL: otclient-wasm (tibia.js/wasm + mods/idleot),
-# tibia-desktop (qtclient tip + pack + installers).
+# Tip images: otclient-wasm / tibia-desktop tagged by Soft+pack
+#   (${idleot_client_sha}-host-${qtclient_sha}) and aliased to :${qtclient_sha}.
 name: Build client
 
 run-name: Assemble client ${{ inputs.qtclient_sha || inputs.otclient_sha }} ${{ inputs.release_id }}
@@ -36,6 +36,8 @@ on:
         value: ${{ jobs.check.outputs.revision }}
       desktop_image:
         value: ${{ jobs.check.outputs.desktop_image }}
+      tip_tag:
+        value: ${{ jobs.check.outputs.pack_tag }}
   workflow_dispatch:
     inputs:
       qtclient_sha:
@@ -66,12 +68,11 @@ env:
   QTCLIENT_REPO: qtclient/qtclient
   IDLEOT_CLIENT_REPO: ${{ github.repository_owner }}/idleot-client
   DESKTOP_IMAGE: tibia-desktop
-  # qtclient host artifacts published by qtclient ci-host.yml
   HOST_OWNER: qtclient
 
 jobs:
   check:
-    name: Wait qtclient host artifacts
+    name: Ensure Soft host + tip plan
     runs-on: ubuntu-latest
     timeout-minutes: 130
     outputs:
@@ -98,10 +99,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate pins + wait qtclient host
+      - name: Validate pins + ensure Soft host + tip identity
         id: exists
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ inputs.release_id || format('rel-{0}', github.run_id) }}
         run: |
           set -euo pipefail
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -115,17 +117,17 @@ jobs:
           [[ "$IDLEOT_CLIENT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
             echo "::error::idleot_client_sha must be a full commit SHA"; exit 1
           }
+          # Tip identity = Soft host + IdleOT pack (never Soft SHA alone).
           pack_tag="${IDLEOT_CLIENT_SHA}-host-${SHA}"
           echo "pack_tag=$pack_tag" >> "$GITHUB_OUTPUT"
 
-          # Skip assemble when product slices already exist for this host SHA.
           need_pack=false
           for slice in wasm desktop; do
             image="otclient-wasm"
             [[ "$slice" == desktop ]] && image="$DESKTOP_IMAGE"
-            if docker buildx imagetools inspect "$REGISTRY/$image:$SHA" >/dev/null 2>&1; then
+            if docker buildx imagetools inspect "$REGISTRY/$image:$pack_tag" >/dev/null 2>&1; then
               echo "$slice=true" >> "$GITHUB_OUTPUT"
-              echo "$image:$SHA exists — skip assemble"
+              echo "$image:$pack_tag exists — skip assemble"
             else
               echo "$slice=false" >> "$GITHUB_OUTPUT"
               need_pack=true
@@ -135,13 +137,9 @@ jobs:
 
           echo "revision=$(date -u +%Y%m%d)-${SHA::7}-${IDLEOT_CLIENT_SHA::7}" >> "$GITHUB_OUTPUT"
 
-          # Soft client-* only (public qtclient CI). Packs build on this public repo.
+          # Release-owned Soft publish when host ORAS missing (parallel with server/portal).
           if [[ "$need_pack" == true ]]; then
-            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/client-sdk:${SHA}" 7200 90
-            bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/client-wasm:${SHA}" 7200 90
-            for plat in linux-x64 windows-x64 macos-arm64; do
-              bash scripts/wait-ghcr-artifact.sh "ghcr.io/${HOST_OWNER}/client-${plat}:${SHA}" 7200 90
-            done
+            bash scripts/ensure-soft-host.sh "$SHA" "$RELEASE_ID"
           fi
 
   build-pack:
@@ -251,12 +249,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push otclient-wasm:${{ env.SHA }}
+      - name: Push otclient-wasm tip (pack + Soft alias)
         working-directory: ${{ runner.temp }}/slice
         run: |
           printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
+          pack_tag="${{ needs.check.outputs.pack_tag }}"
           docker buildx build --push --provenance=false --sbom=false \
             -f Dockerfile.slice \
+            -t "${{ env.REGISTRY }}/otclient-wasm:${pack_tag}" \
             -t "${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}" .
 
   desktop:
@@ -612,7 +612,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push ${{ needs.check.outputs.desktop_image }}:${{ env.SHA }}
+      - name: Push ${{ needs.check.outputs.desktop_image }} tip (pack + Soft alias)
         uses: docker/build-push-action@v6
         with:
           context: slice
@@ -620,4 +620,6 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          tags: ${{ env.REGISTRY }}/${{ needs.check.outputs.desktop_image }}:${{ env.SHA }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ needs.check.outputs.desktop_image }}:${{ needs.check.outputs.pack_tag }}
+            ${{ env.REGISTRY }}/${{ needs.check.outputs.desktop_image }}:${{ env.SHA }}
