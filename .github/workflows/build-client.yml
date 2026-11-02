@@ -184,6 +184,18 @@ jobs:
 
       - uses: oras-project/setup-oras@v1
 
+      - name: Checkout idleot-client (launcher brand)
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.IDLEOT_CLIENT_REPO }}
+          ref: ${{ env.IDLEOT_CLIENT_SHA }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          path: _idleot-client
+          persist-credentials: false
+          sparse-checkout: |
+            launcher
+          sparse-checkout-cone-mode: true
+
       - name: Download pack-wasm artifact
         uses: actions/download-artifact@v4
         with:
@@ -191,7 +203,7 @@ jobs:
           path: ${{ runner.temp }}/pack/idleot
 
       # Soft client-* is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
-      - name: Pull qtclient client-wasm + merge pack
+      - name: Pull qtclient client-wasm + merge pack + brand
         run: |
           set -euo pipefail
           oras logout ghcr.io 2>/dev/null || true
@@ -224,6 +236,13 @@ jobs:
           [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing after assemble"; exit 1; }
           tip="$(dirname "$js")"
           test -d "$tip/mods/idleot"
+          # Launcher chrome (brand.json + images) is part of the tip mods channel.
+          bash _qtclient/scripts/lifecycle/lib/merge-launcher-brand.sh \
+            --pack "_idleot-client/launcher" --tip "$tip"
+          test -f "$tip/mods/idleot/brand.json" || {
+            echo "::error::tip mods/idleot/brand.json missing after merge-launcher-brand" >&2
+            exit 1
+          }
           # Belt-and-suspenders: tip mod.json must not ship local loginBase.
           SITE="${IDLEOT_SITE_URL:-${TIBIA_SITE_URL:-https://www.idleot.com}}"
           ASSET="${IDLEOT_ASSET_BASE:-${TIBIA_ASSET_BASE:-https://static.idleot.com}}"
@@ -234,6 +253,8 @@ jobs:
             echo "::error::tip mod.json still has 127.0.0.1 after stamp" >&2
             exit 1
           }
+          # Tip mods stamp (content hash of staged pack) for Soft modsversionurl.
+          python3 scripts/emit-mods-stamp.py "$tip/mods/idleot" "$tip"
           (
             cd "$tip/mods/idleot"
             find . -type f | sed 's|^\./||' | sort
@@ -344,6 +365,13 @@ jobs:
           [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
           bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
             --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
+          bash _qtclient/scripts/lifecycle/lib/merge-launcher-brand.sh \
+            --pack "_idleot-client/launcher" --tip "$tip"
+          test -f "$tip/mods/idleot/brand.json" || {
+            echo "::error::desktop tip mods/idleot/brand.json missing" >&2
+            exit 1
+          }
+          python3 scripts/emit-mods-stamp.py "$tip/mods/idleot" "$tip"
           grep -q '127.0.0.1' "$tip/mods/idleot/mod.json" && {
             echo "::error::desktop tip mod.json still has 127.0.0.1 after stamp" >&2
             exit 1
