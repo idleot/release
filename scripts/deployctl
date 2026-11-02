@@ -200,12 +200,15 @@ EOF
       ;;
     remote)
       # Run an arbitrary bash snippet under COMPOSE_REMOTE_DIR.
+      # Base64 the snippet: an unquoted heredoc would expand $DUMP/$DBUSER
+      # on the Actions runner before SSH (empty redirects, false success).
       remote_q="$(printf %q "$REMOTE_DIR")"
       snippet="${1:?deployctl remote needs a bash snippet}"
+      b64="$(printf '%s' "$snippet" | base64 | tr -d '\n')"
       compose_ssh "bash -s" <<EOF
 set -euo pipefail
 cd $remote_q
-$snippet
+echo '$b64' | base64 -d | bash -s
 EOF
       ;;
     *) echo "deployctl compose-ssh: unknown cmd $cmd" >&2; exit 2 ;;
