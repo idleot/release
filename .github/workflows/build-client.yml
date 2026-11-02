@@ -369,14 +369,18 @@ jobs:
             --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
           bash _qtclient/scripts/lifecycle/lib/merge-launcher-brand.sh \
             --pack "_idleot-client/launcher" --tip "$tip"
-          # Soft resolves engine root → Contents/MacOS; locate the pack for asserts.
-          pack_tip="$tip/mods/idleot"
-          if [[ ! -f "$pack_tip/mod.json" ]]; then
-            macos="$(find "$tip" -maxdepth 3 -path '*/Contents/MacOS/mods/idleot/mod.json' | head -1 || true)"
-            [[ -n "$macos" ]] && pack_tip="$(dirname "$macos")"
+          # Soft merge-pack resolves engine root → Contents/MacOS; prefer that pack.
+          # (maxdepth must reach …/Contents/MacOS/mods/idleot/mod.json — depth ≥ 6.)
+          pack_tip=""
+          macos="$(find "$tip" -path '*/Contents/MacOS/mods/idleot/mod.json' 2>/dev/null | head -1 || true)"
+          if [[ -n "$macos" ]]; then
+            pack_tip="$(dirname "$macos")"
+          elif [[ -f "$tip/mods/idleot/mod.json" ]]; then
+            pack_tip="$tip/mods/idleot"
           fi
-          test -f "$pack_tip/brand.json" || {
-            echo "::error::desktop tip mods/idleot/brand.json missing" >&2
+          test -n "$pack_tip" && test -f "$pack_tip/brand.json" || {
+            echo "::error::desktop tip mods/idleot/brand.json missing (tip=$tip)" >&2
+            find "$tip" -path '*/mods/idleot/*' 2>/dev/null | head -40 >&2 || true
             exit 1
           }
           python3 scripts/assert-tip-mod-json.py "$pack_tip/mod.json"
