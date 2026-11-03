@@ -458,6 +458,18 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
+          # Build step stages the Soft tip under linked-tip/ (artifact path).
+          # ORAS cache matches desktop: pack/idleot only.
+          tip_pack="$(find linked-tip -path '*/mods/idleot/mod.json' 2>/dev/null | head -1 | xargs -r dirname || true)"
+          [[ -n "${tip_pack:-}" && -f "$tip_pack/mod.json" ]] || tip_pack="linked-tip/mods/idleot"
+          [[ -f "$tip_pack/mod.json" ]] || {
+            echo "::error::no stamped mods/idleot under linked-tip for ORAS push" >&2
+            find linked-tip -path '*/mods/*' 2>/dev/null | head -40 || true
+            exit 1
+          }
+          mkdir -p pack
+          rm -rf pack/idleot
+          cp -a "$tip_pack" pack/idleot
           tar -czf pack.tgz -C pack idleot
           tag="${{ needs.meta.outputs.pack_tag }}"
           oras push "ghcr.io/${{ github.repository_owner }}/pack-idleot-wasm:${tag}" \
