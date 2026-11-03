@@ -1,9 +1,7 @@
 ---
-# Assemble release client slices from qtclient host GHCR + IdleOT packs built here.
-# Soft host is Release-owned: ensure-soft-host.sh dispatches qtclient Client:ci at
-# the pin SHA when client-* ORAS is missing (no Soft-main warm dependency).
-# Pack MODULE/SIDE_MODULE compiles on this public repo (free minutes).
-# Does NOT compile qtclient tibia/wasm here.
+# Assemble release client slices from Soft+IdleOT linked tips built in build-pack.
+# Soft stock host may still be ensured for desktop Soft ORAS fallbacks; product
+# wasm tip is the linked tip artifact (STATIC IdleOT — no SIDE_MODULE merge).
 #
 # Tip images: otclient-wasm / tibia-desktop tagged by Soft+pack
 #   (${idleot_client_sha}-host-${qtclient_sha}) and aliased to :${qtclient_sha}.
@@ -196,79 +194,44 @@ jobs:
             launcher
           sparse-checkout-cone-mode: true
 
-      - name: Download pack-wasm artifact
+      - name: Download linked-tip wasm artifact
         uses: actions/download-artifact@v4
         with:
           name: pack-idleot-wasm
-          path: ${{ runner.temp }}/pack/idleot
+          path: ${{ runner.temp }}/linked-tip
 
-      # Soft client-* is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
-      - name: Pull qtclient client-wasm + merge pack + brand
+      - name: Brand linked tip + stamp
         run: |
           set -euo pipefail
-          oras logout ghcr.io 2>/dev/null || true
-          bash scripts/pull-oras-dir.sh \
-            "ghcr.io/${HOST_OWNER}/client-wasm:${SHA}" "$RUNNER_TEMP/client-wasm"
-          pack="$RUNNER_TEMP/pack/idleot"
-          test -f "$pack/mod.json"
-          pack_wasm="$pack/native/mod.wasm"
-          test -f "$pack_wasm" || {
-            echo "::error::pack native/mod.wasm missing — cannot gate Soft⊇pack coverage" >&2
+          mkdir -p "$RUNNER_TEMP/slice"
+          cp -a "$RUNNER_TEMP/linked-tip/." "$RUNNER_TEMP/slice/"
+          js="$(find "$RUNNER_TEMP/slice" -name tibia.js | head -1 || true)"
+          [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing in linked tip artifact"; exit 1; }
+          tip="$(dirname "$js")"
+          test -f "$tip/tibia.wasm" || {
+            echo "::error::tibia.wasm missing in linked tip" >&2
             exit 1
           }
-          mkdir -p "$RUNNER_TEMP/slice"
-          # Soft tip is already CDN-sliced (client/<rev>/wasm/tibia.js). Merge the
-          # pack next to tibia.js so ModLoader sees mods/idleot beside the binary.
-          if [[ -d "$RUNNER_TEMP/client-wasm/client" ]]; then
-            js="$(find "$RUNNER_TEMP/client-wasm" -name tibia.js | head -1 || true)"
-            [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing in Soft client-wasm tip"; exit 1; }
-            tip_pre="$(dirname "$js")"
-            host_wasm="$tip_pre/tibia.wasm"
-            [[ -f "$host_wasm" ]] || host_wasm="$(find "$RUNNER_TEMP/client-wasm" -name tibia.wasm | head -1 || true)"
-            [[ -n "$host_wasm" && -f "$host_wasm" ]] || {
-              echo "::error::tibia.wasm missing in Soft client-wasm tip" >&2
-              exit 1
-            }
-            # Fail closed before tip-merge: Soft keepalives must cover pack imports.
-            bash _qtclient/scripts/lifecycle/lib/check-pack-host-coverage.sh \
-              "$host_wasm" "$pack_wasm"
-            bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
-              --pack "$pack" --tip "$tip_pre" --platform wasm
-            cp -a "$RUNNER_TEMP/client-wasm/." "$RUNNER_TEMP/slice/"
-          else
-            bash _qtclient/scripts/lifecycle/package/pack-tibia-wasm.sh \
-              "$RUNNER_TEMP/client-wasm" "$RUNNER_TEMP/slice"
-            js="$(find "$RUNNER_TEMP/slice" -name tibia.js | head -1 || true)"
-            [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing after pack-tibia-wasm"; exit 1; }
-            tip_pre="$(dirname "$js")"
-            host_wasm="$tip_pre/tibia.wasm"
-            [[ -f "$host_wasm" ]] || {
-              echo "::error::tibia.wasm missing after pack-tibia-wasm" >&2
-              exit 1
-            }
-            bash _qtclient/scripts/lifecycle/lib/check-pack-host-coverage.sh \
-              "$host_wasm" "$pack_wasm"
-            bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
-              --pack "$pack" --tip "$tip_pre" --platform wasm
+          test -f "$tip/mods/idleot/mod.json" || {
+            echo "::error::linked tip mods/idleot/mod.json missing" >&2
+            exit 1
+          }
+          if [[ -d "$tip/mods/idleot/native" ]]; then
+            echo "::error::native/ must not ship on linked tip" >&2
+            exit 1
           fi
+          bash _qtclient/scripts/lifecycle/lib/check-tip-pack-presence.sh \
+            --tip "$tip" --id idleot --allow-urls-only
           mkdir -p "$RUNNER_TEMP/slice/.idleot"
           if [[ -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" ]]; then
             cp -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" "$RUNNER_TEMP/slice/.idleot/wasm.json"
           fi
-          js="$(find "$RUNNER_TEMP/slice" -name tibia.js | head -1 || true)"
-          [[ -n "$js" && -f "$js" ]] || { echo "::error::tibia.js missing after assemble"; exit 1; }
-          tip="$(dirname "$js")"
-          bash _qtclient/scripts/lifecycle/lib/check-tip-pack-presence.sh \
-            --tip "$tip" --id idleot --require-native
-          test -d "$tip/mods/idleot"
-          # Launcher chrome (brand.json + images) is part of the tip mods channel.
           bash _qtclient/scripts/lifecycle/lib/merge-launcher-brand.sh \
             --pack "_idleot-client/launcher" --tip "$tip"
           test -f "$tip/mods/idleot/brand.json" || {
             echo "::error::tip mods/idleot/brand.json missing after merge-launcher-brand" >&2
             exit 1
           }
-          # Belt-and-suspenders: tip mod.json must not ship local loginBase.
           SITE="${IDLEOT_SITE_URL:-${TIBIA_SITE_URL:-https://www.idleot.com}}"
           ASSET="${IDLEOT_ASSET_BASE:-${TIBIA_ASSET_BASE:-https://static.idleot.com}}"
           PAY="${QTCLIENT_PAYMENTS_URL:-https://payments.idleot.com}"
@@ -278,9 +241,7 @@ jobs:
             echo "::error::tip mod.json still has 127.0.0.1 after stamp" >&2
             exit 1
           }
-          # ModLoader requires non-empty id (+ API); launcher brand must not clobber pack meta.
           python3 scripts/assert-tip-mod-json.py "$tip/mods/idleot/mod.json"
-          # Tip mods stamp (content hash of staged pack) for Soft modsversionurl.
           python3 scripts/emit-mods-stamp.py "$tip/mods/idleot" "$tip"
           (
             cd "$tip/mods/idleot"
@@ -367,15 +328,10 @@ jobs:
           name: pack-idleot-${{ matrix.platform }}
           path: ${{ runner.temp }}/pack/idleot
 
-      # Soft client-* is public; idleot GITHUB_TOKEN login 403s cross-org oras pulls.
-      - name: Pull qtclient client tip + merge pack
+      - name: Stage linked desktop tip + brand
         shell: bash
         run: |
           set -euo pipefail
-          oras logout ghcr.io 2>/dev/null || true
-          bash scripts/pull-oras-dir.sh \
-            "ghcr.io/${HOST_OWNER}/client-${{ matrix.platform }}:${SHA}" \
-            "$RUNNER_TEMP/client"
           pack="$RUNNER_TEMP/pack/idleot"
           test -f "$pack/mod.json"
           SITE="${IDLEOT_SITE_URL:-${TIBIA_SITE_URL:-https://www.idleot.com}}"
@@ -384,14 +340,32 @@ jobs:
           python3 scripts/stamp-mod-urls.py "$pack/mod.json" \
             --site "$SITE" --asset "$ASSET" --payments "$PAY"
           echo "PACK_DIR=$pack" >> "$GITHUB_ENV"
-          # Stage pack sources for brand.cmake / icons discovery in package_desktop.
           mkdir -p _qtclient/client/mods _qtclient/launcher/mods
           cp -a _idleot-client/client _qtclient/client/mods/idleot
           cp -a _idleot-client/launcher _qtclient/launcher/mods/idleot
-          tip="$RUNNER_TEMP/client/engine"
-          [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
-          bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
-            --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
+          # Prefer Soft tip built with QTCLIENT_LINKED_PACK (pack artifact soft-tip).
+          if [[ -d "$RUNNER_TEMP/pack/soft-tip" ]]; then
+            cp -a "$RUNNER_TEMP/pack/soft-tip/." "$RUNNER_TEMP/client/"
+            tip="$RUNNER_TEMP/client/engine"
+            [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
+            echo "[assemble] using linked Soft tip from pack artifact"
+          else
+            oras logout ghcr.io 2>/dev/null || true
+            bash scripts/pull-oras-dir.sh \
+              "ghcr.io/${HOST_OWNER}/client-${{ matrix.platform }}:${SHA}" \
+              "$RUNNER_TEMP/client"
+            tip="$RUNNER_TEMP/client/engine"
+            [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
+            echo "::warning::soft-tip missing — merging FS onto Soft ORAS tip (C++ may be absent)" >&2
+            bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
+              --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
+          fi
+          # Ensure FS chrome + brand on tip (linked tip already has mods/idleot).
+          if [[ ! -f "$tip/mods/idleot/mod.json" ]] && \
+             [[ -z "$(find "$tip" -path '*/Contents/MacOS/mods/idleot/mod.json' 2>/dev/null | head -1)" ]]; then
+            bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
+              --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
+          fi
           bash _qtclient/scripts/lifecycle/lib/merge-launcher-brand.sh \
             --pack "_idleot-client/launcher" --tip "$tip"
           # Soft merge-pack resolves engine root → Contents/MacOS; prefer that pack.

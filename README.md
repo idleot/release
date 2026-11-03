@@ -67,7 +67,7 @@ launcher (`/launcher/tibiametadata.json`).
 
 Wall-clock is `max(Soft full matrix, server, portal) + packs + assemble +
 promote`. Soft wasm is usually the long pole. Optional: self-hosted Linux
-runners with persistent ccache/Qt for Soft wasm + `pack-wasm` (label via Soft /
+runners with persistent ccache/Qt for Soft linked tip + pack FS (label via Soft /
 Release `runs-on`; do not put builders on the game host). Compile caches speed
 jobs; Release never assumes Soft main already published the pin.
 

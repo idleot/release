@@ -1,7 +1,8 @@
 ---
-# Build IdleOT MODULE/SIDE_MODULE packs on **public** runners (free minutes).
-# Private idleot/idleot-client has no pack compile CI — release checks it out
-# with RELEASE_TOKEN after Soft client-* artifacts exist on GHCR.
+# Build Soft+IdleOT linked tips on **public** runners (free minutes).
+# Pack C++ STATIC-links into Soft (QTCLIENT_LINKED_PACK); FS chrome stages under
+# mods/idleot/. No MODULE/SIDE_MODULE. Private idleot-client is checked out with
+# RELEASE_TOKEN; Soft tree provides cmake/Qt/emsdk.
 #
 # Compile/dep cache: same Soft contract via vendored
 # .github/actions/cache-{restore,save} (workspace/.cache/{vcpkg,ccache} + Soft GHCR
@@ -162,13 +163,16 @@ jobs:
           QT_PULL_WAIT_SECS: '7200'
         run: bash tools/qt/ci-setup.sh --pull-only --with-vcpkg --with-deps
 
-      - name: Build pack MODULE
+      - name: Build Soft linked tip (STATIC IdleOT)
         shell: bash
-        working-directory: idleot-client
+        working-directory: _qtclient
         env:
+          QT_ROOT: ${{ runner.temp }}/Qt
           VCPKG_TARGET_TRIPLET: ${{ matrix.triplet }}
           VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
-          # module.sh stamps mod.json urls.* from these (default keeps :5173).
+          STOCK_HOST: '0'
+          QTCLIENT_ENABLE_MODS: 'ON'
+          QTCLIENT_LINKED_PACK: ${{ github.workspace }}/idleot-client/client
           TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
@@ -183,34 +187,44 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then
             export PATH="/c/ProgramData/chocolatey/bin:/c/tools/zstd:$PATH"
           fi
-          # client-sdk ships cipgen + headers; keep _qtclient tools/qt for CIP Qt prefix.
-          sdk="$RUNNER_TEMP/client-sdk"
-          mkdir -p "$sdk/tools"
-          rm -rf "$sdk/tools/qt"
-          cp -a "$GITHUB_WORKSPACE/_qtclient/tools/qt" "$sdk/tools/qt"
-          # Pack cmake from Soft tip (fmt wiring) even when client-sdk is older.
-          mkdir -p "$sdk/cmake"
-          cp -a "$GITHUB_WORKSPACE/_qtclient/cmake/"*.cmake "$sdk/cmake/" 2>/dev/null || true
-          # CMAKE_PREFIX_PATH also inherits QT_PREFIX from bootstrap when qt-prefix is slow.
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
-          # Ensure module.sh subshell sees production URL stamps.
           export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
-          PACK_DIR=""
-          while IFS= read -r line; do
-            echo "$line"
-            case "$line" in PACK_DIR=*) PACK_DIR="${line#PACK_DIR=}" ;; esac
-          done < <(bash scripts/lifecycle/package/module.sh --client-sdk "$sdk")
+          bash scripts/lifecycle/build/desktop.sh
+          bin="$(bash scripts/lifecycle/lib/find-client-bin.sh . 2>/dev/null || true)"
+          [[ -n "$bin" && -e "$bin" ]] || {
+            echo "::error::linked tip client binary missing after Soft desktop build" >&2
+            exit 1
+          }
+          tip="$(dirname "$bin")"
+          pack="$tip/mods/idleot"
+          [[ -f "$pack/mod.json" ]] || {
+            echo "::error::linked tip mods/idleot/mod.json missing" >&2
+            find "$tip" -path '*/mods/*' 2>/dev/null | head -40 || true
+            exit 1
+          }
+          if [[ -d "$pack/native" ]]; then
+            echo "::error::native/ must not ship on linked tip" >&2
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/pack"
-          cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
-          test -f "$RUNNER_TEMP/pack/idleot/mod.json"
-          # Belt-and-suspenders: sparse checkout has no scripts/, stamp inline.
-          python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped',u['loginBase'],u['assetBase'])" \
+          # Artifact keeps FS chrome for assemble brand/stamp; tip binary tree is
+          # published via Soft desktop package below when present.
+          cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
+          # Also stage tip root marker so assemble can prefer linked Soft tip.
+          mkdir -p "$RUNNER_TEMP/pack/linked-tip-meta"
+          echo "$tip" >"$RUNNER_TEMP/pack/linked-tip-meta/tip-dir.txt"
+          python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));d.pop('native',None);u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped',u['loginBase'],u['assetBase'])" \
             "$RUNNER_TEMP/pack/idleot/mod.json" "$TIBIA_SITE_URL" "$TIBIA_ASSET_BASE" "$QTCLIENT_PAYMENTS_URL"
           if grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json"; then
             echo "::error::pack mod.json still has 127.0.0.1 after stamp" >&2
             cat "$RUNNER_TEMP/pack/idleot/mod.json" >&2
             exit 1
           fi
+          # Package Soft desktop tip (engine + mods) for assemble.
+          PACKAGE_OUT="$RUNNER_TEMP/pack/soft-tip" \
+            QTCLIENT_PLATFORM="${{ matrix.plat }}" \
+            PLATFORM="${{ matrix.plat }}" \
+            bash scripts/lifecycle/package/desktop.sh
 
       - name: Save vcpkg + ccache
         if: always()
@@ -345,12 +359,15 @@ jobs:
           QT_PULL_WAIT_SECS: '7200'
         run: bash tools/qt/ci-setup.sh --wasm --pull-only --with-vcpkg --with-deps
 
-      - name: Build SIDE_MODULE pack
-        working-directory: idleot-client
+      - name: Build Soft linked tip (STATIC IdleOT)
+        working-directory: _qtclient
         env:
+          QT_ROOT: ${{ runner.temp }}/Qt
           VCPKG_TARGET_TRIPLET: wasm32-emscripten
           VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
-          # module.sh stamps mod.json urls.* from these (default keeps :5173).
+          STOCK_HOST: '0'
+          QTCLIENT_ENABLE_MODS: 'ON'
+          QTCLIENT_LINKED_PACK: ${{ github.workspace }}/idleot-client/client
           TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
@@ -359,45 +376,42 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
-          # client-sdk + _qtclient tools/qt (emsdk / CIP Qt wasm) for SIDE_MODULE.
-          sdk="$RUNNER_TEMP/client-sdk"
-          mkdir -p "$sdk/tools"
-          rm -rf "$sdk/tools/qt"
-          cp -a "$GITHUB_WORKSPACE/_qtclient/tools/qt" "$sdk/tools/qt"
-          mkdir -p "$sdk/cmake"
-          cp -a "$GITHUB_WORKSPACE/_qtclient/cmake/"*.cmake "$sdk/cmake/" 2>/dev/null || true
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
           export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
-          PACK_DIR=""
-          while IFS= read -r line; do
-            echo "$line"
-            case "$line" in PACK_DIR=*) PACK_DIR="${line#PACK_DIR=}" ;; esac
-          done < <(bash scripts/lifecycle/package/module.sh --wasm --client-sdk "$sdk")
-          mkdir -p "$RUNNER_TEMP/pack"
-          cp -a "$PACK_DIR" "$RUNNER_TEMP/pack/idleot"
-          test -f "$RUNNER_TEMP/pack/idleot/mod.json"
-          python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped',u['loginBase'],u['assetBase'])" \
-            "$RUNNER_TEMP/pack/idleot/mod.json" "$TIBIA_SITE_URL" "$TIBIA_ASSET_BASE" "$QTCLIENT_PAYMENTS_URL"
-          if grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json"; then
-            echo "::error::wasm pack mod.json still has 127.0.0.1 after stamp" >&2
-            cat "$RUNNER_TEMP/pack/idleot/mod.json" >&2
-            exit 1
-          fi
-          # Early Soft bump signal: pack imports ⊆ Soft host_exports.json from SDK.
-          # Binary Soft⊇pack coverage still runs before tip-merge in build-client.
-          exports_json=""
-          for cand in \
-            "$sdk/cmake/host_exports.json" \
-            "$GITHUB_WORKSPACE/_qtclient/cmake/host_exports.json"; do
-            if [[ -f "$cand" ]]; then exports_json="$cand"; break; fi
+          bash scripts/lifecycle/build/wasm.sh
+          bin=""
+          for cand in build/tibia-wasm/bin build/tibia-wasm; do
+            if [[ -f "$cand/tibia.wasm" && -f "$cand/tibia.js" ]]; then
+              bin="$cand"
+              break
+            fi
           done
-          [[ -n "$exports_json" ]] || {
-            echo "::error::host_exports.json missing from client-sdk / Soft tree" >&2
+          [[ -n "$bin" ]] || {
+            echo "::error::linked tip tibia.wasm missing after Soft wasm build" >&2
+            find build/tibia-wasm -name 'tibia.*' 2>/dev/null | head -40 || true
             exit 1
           }
-          gate="$GITHUB_WORKSPACE/_qtclient/scripts/lifecycle/lib/check-pack-host-exports-json.sh"
-          [[ -f "$gate" ]] || gate="$sdk/scripts/lifecycle/lib/check-pack-host-exports-json.sh"
-          bash "$gate" "$RUNNER_TEMP/pack/idleot/native/mod.wasm" "$exports_json"
+          pack="$bin/mods/idleot"
+          [[ -f "$pack/mod.json" ]] || {
+            echo "::error::linked tip mods/idleot/mod.json missing (QTCLIENT_LINKED_PACK stage)" >&2
+            find "$bin" -path '*/mods/*' 2>/dev/null | head -40 || true
+            exit 1
+          }
+          if [[ -d "$pack/native" ]] || find "$pack" -name 'mod.wasm' 2>/dev/null | grep -q .; then
+            echo "::error::native/mod.wasm must not ship on linked tip" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/linked-tip"
+          bash scripts/lifecycle/package/pack-tibia-wasm.sh "$bin" "$RUNNER_TEMP/linked-tip"
+          tip_pack="$(find "$RUNNER_TEMP/linked-tip" -path '*/mods/idleot/mod.json' | head -1 | xargs dirname)"
+          [[ -n "$tip_pack" && -f "$tip_pack/mod.json" ]] || tip_pack="$RUNNER_TEMP/linked-tip/mods/idleot"
+          python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));d.pop('native',None);u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped',u['loginBase'],u['assetBase'])" \
+            "$tip_pack/mod.json" "$TIBIA_SITE_URL" "$TIBIA_ASSET_BASE" "$QTCLIENT_PAYMENTS_URL"
+          if grep -q '127.0.0.1' "$tip_pack/mod.json"; then
+            echo "::error::wasm tip mod.json still has 127.0.0.1 after stamp" >&2
+            cat "$tip_pack/mod.json" >&2
+            exit 1
+          fi
 
       - name: Save vcpkg + ccache
         if: always()
@@ -417,7 +431,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pack-idleot-wasm
-          path: ${{ runner.temp }}/pack/idleot
+          path: ${{ runner.temp }}/linked-tip
           retention-days: 2
           include-hidden-files: true
 

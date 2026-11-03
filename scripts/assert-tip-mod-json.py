@@ -2,7 +2,7 @@
 """Fail if tip mods/<id>/mod.json is not loadable by Soft ModLoader.
 
 Catches merge-launcher-brand clobbering the pack meta with a launcher stub
-(name/priority/urls only — no id / QTCLIENT_MOD_API / native).
+(name/priority/urls only — no id / QTCLIENT_MOD_API). Linked tip: no native/.
 """
 from __future__ import annotations
 
@@ -28,13 +28,13 @@ def main() -> int:
         errors.append("missing non-empty id")
     if api < 1:
         errors.append(f"QTCLIENT_MOD_API must be >= 1 (got {api})")
-    if not native:
-        errors.append("missing native (pack SIDE_MODULE path)")
+    if native:
+        errors.append(f"native={native!r} must be omitted (linked tip; no SIDE_MODULE)")
     if errors:
         print(f"::error::{path} is not a loadable tip pack: {'; '.join(errors)}", file=sys.stderr)
         print(json.dumps(doc, indent=2), file=sys.stderr)
         return 1
-    print(f"[assert-tip-mod-json] ok id={mid} api={api} native={native}")
+    print(f"[assert-tip-mod-json] ok id={mid} api={api} (linked tip FS)")
     return 0
 
 
