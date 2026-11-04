@@ -41,7 +41,7 @@ inputs:
     required: false
     default: 'false'
   token:
-    description: 'GHCR push token (Soft GITHUB_TOKEN)'
+    description: 'GHCR push token (qtclient GITHUB_TOKEN)'
     required: false
     default: ''
   actor:

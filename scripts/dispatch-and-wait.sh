@@ -3,8 +3,8 @@
 # Usage: dispatch-and-wait.sh <owner/repo> <workflow-file> <release_id> [key=value ...]
 #
 # Env:
-#   DISPATCH_REF   git ref to run (default: main). Soft host publish uses the
-#                  umbrella Soft pin SHA so Release never depends on Soft main.
+#   DISPATCH_REF   git ref to run (default: main). qtclient host publish uses the
+#                  umbrella qtclient pin SHA so Release never depends on qtclient main.
 #
 # The run is found by its run-name, which must contain the release_id. Only the
 # final conclusion is printed: this runs in a public repo, so step names and

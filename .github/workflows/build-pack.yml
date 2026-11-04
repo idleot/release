@@ -1,11 +1,12 @@
 ---
-# Build Soft+IdleOT linked tips on **public** runners (free minutes).
-# Pack C++ STATIC-links into Soft (QTCLIENT_LINKED_PACK); FS chrome stages under
-# mods/idleot/. No MODULE/SIDE_MODULE. Private idleot-client is checked out with
-# RELEASE_TOKEN; Soft tree provides cmake/Qt/emsdk.
+# Build qtclient+IdleOT linked tips on **public** runners (free minutes).
+# Pack C++ STATIC-links into qtclient (QTCLIENT_LINKED_PACK); FS chrome stages under
+# mods/idleot/. Also stages pack-archive-idleot-* (.a + FS) for QTCLIENT_LINKED_PACK_LIBS.
+# No native/SIDE_MODULE. Private idleot-client is checked out with RELEASE_TOKEN;
+# qtclient tree provides cmake/Qt/emsdk.
 #
-# Compile/dep cache: same Soft contract via vendored
-# .github/actions/cache-{restore,save} (workspace/.cache/{vcpkg,ccache} + Soft GHCR
+# Compile/dep cache: same qtclient contract via vendored
+# .github/actions/cache-{restore,save} (workspace/.cache/{vcpkg,ccache} + qtclient GHCR
 # vcpkg tip). Checkout **this** repo first so local actions stay on disk — packing
 # idleot-client into $GITHUB_WORKSPACE would wipe .github/actions.
 name: Build pack
@@ -112,7 +113,7 @@ jobs:
       - uses: oras-project/setup-oras@v1
       - uses: lukka/get-cmake@v4.3.4
 
-      # Soft client-* packages are public. Do NOT oras-login with idleot GITHUB_TOKEN
+      # qtclient-* packages are public. Do NOT oras-login with idleot GITHUB_TOKEN
       # first — installation tokens 403 cross-org pulls even when the package is public.
       - name: Wait + pull qtclient client-sdk
         shell: bash
@@ -163,7 +164,7 @@ jobs:
           QT_PULL_WAIT_SECS: '7200'
         run: bash tools/qt/ci-setup.sh --pull-only --with-vcpkg --with-deps
 
-      - name: Build Soft linked tip (STATIC IdleOT)
+      - name: Build qtclient linked tip (STATIC IdleOT)
         shell: bash
         working-directory: _qtclient
         env:
@@ -192,7 +193,7 @@ jobs:
           bash scripts/lifecycle/build/desktop.sh
           bin="$(bash scripts/lifecycle/lib/find-client-bin.sh . 2>/dev/null || true)"
           [[ -n "$bin" && -e "$bin" ]] || {
-            echo "::error::linked tip client binary missing after Soft desktop build" >&2
+            echo "::error::linked tip client binary missing after qtclient desktop build" >&2
             exit 1
           }
           tip="$(dirname "$bin")"
@@ -208,9 +209,9 @@ jobs:
           fi
           mkdir -p "$RUNNER_TEMP/pack"
           # Artifact keeps FS chrome for assemble brand/stamp; tip binary tree is
-          # published via Soft desktop package below when present.
+          # published via qtclient desktop package below when present.
           cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
-          # Also stage tip root marker so assemble can prefer linked Soft tip.
+          # Also stage tip root marker so assemble can prefer linked qtclient tip.
           mkdir -p "$RUNNER_TEMP/pack/linked-tip-meta"
           echo "$tip" >"$RUNNER_TEMP/pack/linked-tip-meta/tip-dir.txt"
           python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));d.pop('native',None);u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped',u['loginBase'],u['assetBase'])" \
@@ -220,11 +221,26 @@ jobs:
             cat "$RUNNER_TEMP/pack/idleot/mod.json" >&2
             exit 1
           fi
-          # Package Soft desktop tip (engine + mods) for assemble.
-          PACKAGE_OUT="$RUNNER_TEMP/pack/soft-tip" \
+          # Package qtclient desktop tip (engine + mods) for assemble.
+          PACKAGE_OUT="$RUNNER_TEMP/pack/linked-tip" \
             QTCLIENT_PLATFORM="${{ matrix.plat }}" \
             PLATFORM="${{ matrix.plat }}" \
             bash scripts/lifecycle/package/desktop.sh
+          # Phase 3: pack archive (.a + FS) for QTCLIENT_LINKED_PACK_LIBS tip link.
+          build_dir=""
+          while IFS= read -r libdir; do
+            [[ -z "$libdir" ]] && continue
+            build_dir="$(cd "$libdir/../../.." && pwd)"
+            break
+          done < <(find build -type d -path '*/mods/idleot/lib' 2>/dev/null | head -5)
+          if [[ -n "$build_dir" ]]; then
+            bash scripts/lifecycle/package/archive-mod.sh \
+              --id idleot --build-dir "$build_dir" \
+              --out "$RUNNER_TEMP/pack/archive-idleot" \
+              || echo "::warning::archive-mod.sh failed (non-fatal this run)" >&2
+          else
+            echo "::warning::IdleOT STATIC .a not found under build/*/mods/idleot/lib" >&2
+          fi
 
       - name: Save vcpkg + ccache
         if: always()
@@ -247,6 +263,17 @@ jobs:
           path: ${{ runner.temp }}/pack/idleot
           retention-days: 2
           include-hidden-files: true
+
+      - name: Upload pack archive artifact
+        if: success()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-archive-idleot-${{ matrix.plat }}
+          path: ${{ runner.temp }}/pack/archive-idleot
+          retention-days: 2
+          include-hidden-files: true
+          if-no-files-found: ignore
 
       - name: Pack ccache
         if: always()
@@ -318,7 +345,7 @@ jobs:
       - uses: oras-project/setup-oras@v1
       - uses: lukka/get-cmake@v4.3.4
 
-      # Soft client-* packages are public — pull anonymously (see pack-desktop note).
+      # qtclient-* packages are public — pull anonymously (see pack-desktop note).
       - name: Wait + pull qtclient client-sdk
         run: |
           oras logout ghcr.io 2>/dev/null || true
@@ -359,7 +386,7 @@ jobs:
           QT_PULL_WAIT_SECS: '7200'
         run: bash tools/qt/ci-setup.sh --wasm --pull-only --with-vcpkg --with-deps
 
-      - name: Build Soft linked tip (STATIC IdleOT)
+      - name: Build qtclient linked tip (STATIC IdleOT)
         working-directory: _qtclient
         env:
           QT_ROOT: ${{ runner.temp }}/Qt
@@ -387,7 +414,7 @@ jobs:
             fi
           done
           [[ -n "$bin" ]] || {
-            echo "::error::linked tip tibia.wasm missing after Soft wasm build" >&2
+            echo "::error::linked tip tibia.wasm missing after qtclient wasm build" >&2
             find build/tibia-wasm -name 'tibia.*' 2>/dev/null | head -40 || true
             exit 1
           }
@@ -458,7 +485,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          # Build step stages the Soft tip under linked-tip/ (artifact path).
+          # Build step stages the qtclient tip under linked-tip/ (artifact path).
           # ORAS cache matches desktop: pack/idleot only.
           tip_pack="$(find linked-tip -path '*/mods/idleot/mod.json' 2>/dev/null | head -1 | xargs -r dirname || true)"
           [[ -n "${tip_pack:-}" && -f "$tip_pack/mod.json" ]] || tip_pack="linked-tip/mods/idleot"

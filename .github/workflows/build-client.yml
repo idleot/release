@@ -1,9 +1,9 @@
 ---
-# Assemble release client slices from Soft+IdleOT linked tips built in build-pack.
-# Soft stock host may still be ensured for desktop Soft ORAS fallbacks; product
+# Assemble release client slices from qtclient+IdleOT linked tips built in build-pack.
+# qtclient stock host may still be ensured for desktop qtclient ORAS fallbacks; product
 # wasm tip is the linked tip artifact (STATIC IdleOT — no SIDE_MODULE merge).
 #
-# Tip images: otclient-wasm / tibia-desktop tagged by Soft+pack
+# Tip images: otclient-wasm / tibia-desktop tagged by qtclient+pack
 #   (${idleot_client_sha}-host-${qtclient_sha}) and aliased to :${qtclient_sha}.
 name: Build client
 
@@ -70,7 +70,7 @@ env:
 
 jobs:
   check:
-    name: Ensure Soft host + tip plan
+    name: Ensure qtclient host + tip plan
     runs-on: ubuntu-latest
     timeout-minutes: 130
     outputs:
@@ -97,7 +97,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate pins + ensure Soft host + tip identity
+      - name: Validate pins + ensure qtclient host + tip identity
         id: exists
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
@@ -115,7 +115,7 @@ jobs:
           [[ "$IDLEOT_CLIENT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
             echo "::error::idleot_client_sha must be a full commit SHA"; exit 1
           }
-          # Tip identity = Soft host + IdleOT pack (never Soft SHA alone).
+          # Tip identity = qtclient host + IdleOT pack (never qtclient SHA alone).
           pack_tag="${IDLEOT_CLIENT_SHA}-host-${SHA}"
           echo "pack_tag=$pack_tag" >> "$GITHUB_OUTPUT"
 
@@ -135,9 +135,9 @@ jobs:
 
           echo "revision=$(date -u +%Y%m%d)-${SHA::7}-${IDLEOT_CLIENT_SHA::7}" >> "$GITHUB_OUTPUT"
 
-          # Release-owned Soft publish when host ORAS missing (parallel with server/portal).
+          # Release-owned qtclient publish when host ORAS missing (parallel with server/portal).
           if [[ "$need_pack" == true ]]; then
-            bash scripts/ensure-soft-host.sh "$SHA" "$RELEASE_ID"
+            bash scripts/ensure-qtclient-host.sh "$SHA" "$RELEASE_ID"
           fi
 
   build-pack:
@@ -242,7 +242,8 @@ jobs:
             exit 1
           }
           python3 scripts/assert-tip-mod-json.py "$tip/mods/idleot/mod.json"
-          python3 scripts/emit-mods-stamp.py "$tip/mods/idleot" "$tip"
+          # Multi-pack aware: stamp every mods/<id>/ under the tip.
+          python3 scripts/emit-mods-stamp.py "$tip/mods" "$tip"
           (
             cd "$tip/mods/idleot"
             find . -type f | sed 's|^\./||' | sort
@@ -258,7 +259,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push otclient-wasm tip (pack + Soft alias)
+      - name: Push otclient-wasm tip (pack + qtclient alias)
         working-directory: ${{ runner.temp }}/slice
         run: |
           printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
@@ -343,12 +344,12 @@ jobs:
           mkdir -p _qtclient/client/mods _qtclient/launcher/mods
           cp -a _idleot-client/client _qtclient/client/mods/idleot
           cp -a _idleot-client/launcher _qtclient/launcher/mods/idleot
-          # Prefer Soft tip built with QTCLIENT_LINKED_PACK (pack artifact soft-tip).
-          if [[ -d "$RUNNER_TEMP/pack/soft-tip" ]]; then
-            cp -a "$RUNNER_TEMP/pack/soft-tip/." "$RUNNER_TEMP/client/"
+          # Prefer qtclient tip built with QTCLIENT_LINKED_PACK (pack artifact linked-tip).
+          if [[ -d "$RUNNER_TEMP/pack/linked-tip" ]]; then
+            cp -a "$RUNNER_TEMP/pack/linked-tip/." "$RUNNER_TEMP/client/"
             tip="$RUNNER_TEMP/client/engine"
             [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
-            echo "[assemble] using linked Soft tip from pack artifact"
+            echo "[assemble] using linked qtclient tip from pack artifact"
           else
             oras logout ghcr.io 2>/dev/null || true
             bash scripts/pull-oras-dir.sh \
@@ -356,7 +357,7 @@ jobs:
               "$RUNNER_TEMP/client"
             tip="$RUNNER_TEMP/client/engine"
             [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
-            echo "::warning::soft-tip missing — merging FS onto Soft ORAS tip (C++ may be absent)" >&2
+            echo "::warning::linked-tip missing — merging FS onto qtclient ORAS tip (C++ may be absent)" >&2
             bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
               --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
           fi
@@ -368,7 +369,7 @@ jobs:
           fi
           bash _qtclient/scripts/lifecycle/lib/merge-launcher-brand.sh \
             --pack "_idleot-client/launcher" --tip "$tip"
-          # Soft merge-pack resolves engine root → Contents/MacOS; prefer that pack.
+          # qtclient merge-pack resolves engine root → Contents/MacOS; prefer that pack.
           # (maxdepth must reach …/Contents/MacOS/mods/idleot/mod.json — depth ≥ 6.)
           pack_tip=""
           macos="$(find "$tip" -path '*/Contents/MacOS/mods/idleot/mod.json' 2>/dev/null | head -1 || true)"
@@ -383,7 +384,8 @@ jobs:
             exit 1
           }
           python3 scripts/assert-tip-mod-json.py "$pack_tip/mod.json"
-          python3 scripts/emit-mods-stamp.py "$pack_tip" "$(dirname "$(dirname "$pack_tip")")"
+          # Stamp all packs under tip mods/ (multi-pack channel).
+          python3 scripts/emit-mods-stamp.py "$(dirname "$pack_tip")" "$(dirname "$(dirname "$pack_tip")")"
           grep -q '127.0.0.1' "$pack_tip/mod.json" && {
             echo "::error::desktop tip mod.json still has 127.0.0.1 after stamp" >&2
             exit 1
@@ -659,7 +661,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push ${{ needs.check.outputs.desktop_image }} tip (pack + Soft alias)
+      - name: Push ${{ needs.check.outputs.desktop_image }} tip (pack + qtclient alias)
         uses: docker/build-push-action@v6
         with:
           context: slice

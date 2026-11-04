@@ -2,7 +2,7 @@
 # Fail fast when release pins lack GHCR images (require_images path only).
 # Env: REGISTRY, OTC_SHA, optional IDLEOT_CLIENT_SHA / TIP_TAG, CRYSTAL_SHA,
 #      CLIENT/SERVER/PORTAL ("true"/"false"). DESKTOP_IMAGE defaults to tibia-desktop.
-# Client tips are Soft+pack: prefer TIP_TAG or ${IDLEOT_CLIENT_SHA}-host-${OTC_SHA}.
+# Client tips are qtclient+pack: prefer TIP_TAG or ${IDLEOT_CLIENT_SHA}-host-${OTC_SHA}.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:?}"

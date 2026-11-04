@@ -2,13 +2,13 @@
 # Release orchestrator. An idleot/idleot tag (v*) dispatches this with the tag
 # as `ref`; the umbrella's submodule pointers are the pins.
 #
-# Tag cuts use components=all (atomic): Soft host + packs + server + portal
-# build in parallel, then one promote. Soft host is Release-owned via
-# ensure-soft-host.sh (dispatches qtclient Client:ci at the Soft pin) — no
-# Soft-main warm dependency.
+# Tag cuts use components=all (atomic): qtclient host + packs + server + portal
+# build in parallel, then one promote. qtclient host is Release-owned via
+# ensure-qtclient-host.sh (dispatches qtclient Client:ci at the qtclient pin) — no
+# qtclient-main warm dependency.
 #
-#   resolve -> Soft host ‖ server ‖ portal ‖ (packs after Soft)
-#           -> assemble tips (Soft+pack identity) -> bundle
+#   resolve -> qtclient host ‖ server ‖ portal ‖ (packs after qtclient)
+#           -> assemble tips (qtclient+pack identity) -> bundle
 #           -> record live -> deploy server → CDN flip → portal (atomic gate)
 #           -> (any failure: roll apps back, restore previous latest/)
 #           -> move :latest to what is live, GitHub Release on the umbrella tag
@@ -185,7 +185,7 @@ jobs:
     uses: ./.github/workflows/bundle.yml
     secrets: inherit
     with:
-      # Prefer Soft+pack tip tag from assemble; alias :qtclient_sha also pushed.
+      # Prefer qtclient+pack tip tag from assemble; alias :qtclient_sha also pushed.
       wasm_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha) || 'latest' }}
       desktop_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha) || 'latest' }}
       desktop_image: ${{ needs.build-client.outputs.desktop_image }}
@@ -240,7 +240,7 @@ jobs:
             need "$REGISTRY/otclient-wasm:$tag"
             need "$REGISTRY/$DESKTOP_IMAGE:$tag"
             echo "### Client tip" >> "$GITHUB_STEP_SUMMARY"
-            echo "- Soft \`${OTC_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- qtclient \`${OTC_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
             echo "- pack \`${PACK_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
             echo "- tip tag \`${tag}\`" >> "$GITHUB_STEP_SUMMARY"
           fi

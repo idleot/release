@@ -7,13 +7,13 @@ cost no Actions minutes. Engine source stays in private repos.
 ## Cutting a release
 
 **One step:** push submodule pins, then tag. Every tag is an **atomic full cut**
-(`components=all`): Soft host + IdleOT packs + server + portal build, then one
-promote. Release does **not** depend on Soft `main` already having published
-the Soft pin — it dispatches Soft `Client:ci` at that SHA when host ORAS is
+(`components=all`): qtclient host + IdleOT packs + server + portal build, then one
+promote. Release does **not** depend on qtclient `main` already having published
+the qtclient pin — it dispatches qtclient `Client:ci` at that SHA when host ORAS is
 missing.
 
 ```bash
-# After pushing Soft / crystalserver / portal / idleot-client pins:
+# After pushing qtclient / crystalserver / portal / idleot-client pins:
 git tag -a v1.4.0 -m "notes"
 git push origin v1.4.0
 ```
@@ -23,8 +23,8 @@ git push origin v1.4.0
 
 ```
 resolve (all components)
-  -> Soft host dispatch ‖ server image ‖ portal image
-  -> IdleOT packs (after Soft ORAS) -> assemble tips (Soft+pack tag)
+  -> qtclient host dispatch ‖ server image ‖ portal image
+  -> IdleOT packs (after qtclient ORAS) -> assemble tips (qtclient+pack tag)
   -> bundle -> verify -> record-live
   -> deploy server → CDN tip flip → portal | Pages
   -> :latest = live, GitHub Release on the umbrella tag
@@ -32,15 +32,15 @@ resolve (all components)
 
 Client path:
 
-1. **Ensure Soft host** — `scripts/ensure-soft-host.sh` dispatches public
-   `qtclient` `Client:ci` at the Soft pin when `client-*` ORAS is missing, then
+1. **Ensure qtclient host** — `scripts/ensure-qtclient-host.sh` dispatches public
+   `qtclient` `Client:ci` at the qtclient pin when `client-*` ORAS is missing, then
    waits for `client-sdk` / `client-wasm` / `client-<plat>:<sha>`.
 2. **Build IdleOT packs** on this public repo (`build-pack.yml`) — checks out
    private `idleot-client` with `RELEASE_TOKEN`.
 3. **Assemble** tip (merge `mods/idleot`) → GHCR slices tagged
    `${idleot_client_sha}-host-${qtclient_sha}` (and aliased to `:${qtclient_sha}`).
 
-qtclient tibia/wasm is never compiled in this repo (only on Soft).
+qtclient tibia/wasm is never compiled in this repo (only on qtclient).
 
 There is **no portal login gate**. Releases match CIP: bounce/restart the game
 world (clients see unreachable / connection-lost), flip
@@ -65,11 +65,11 @@ launcher (`/launcher/tibiametadata.json`).
 
 ### Speed (no warm dependency)
 
-Wall-clock is `max(Soft full matrix, server, portal) + packs + assemble +
-promote`. Soft wasm is usually the long pole. Optional: self-hosted Linux
-runners with persistent ccache/Qt for Soft linked tip + pack FS (label via Soft /
+Wall-clock is `max(qtclient full matrix, server, portal) + packs + assemble +
+promote`. qtclient wasm is usually the long pole. Optional: self-hosted Linux
+runners with persistent ccache/Qt for qtclient linked tip + pack FS (label via qtclient /
 Release `runs-on`; do not put builders on the game host). Compile caches speed
-jobs; Release never assumes Soft main already published the pin.
+jobs; Release never assumes qtclient main already published the pin.
 
 ## Privacy
 
@@ -102,8 +102,8 @@ healthz
 
 | Slice | Image | Built by |
 |-------|-------|----------|
-| WASM | `ghcr.io/idleot/otclient-wasm:<pack>-host-<soft>` (+ Soft SHA alias) | `build-client.yml` (ensure Soft host + pack, assemble tip) |
-| Desktop store | `ghcr.io/idleot/tibia-desktop:<pack>-host-<soft>` (+ Soft SHA alias) | same |
+| WASM | `ghcr.io/idleot/otclient-wasm:<pack>-host-<soft>` (+ qtclient SHA alias) | `build-client.yml` (ensure qtclient host + pack, assemble tip) |
+| Desktop store | `ghcr.io/idleot/tibia-desktop:<pack>-host-<soft>` (+ qtclient SHA alias) | same |
 | Thin CDN runtime | `ghcr.io/idleot/cdn:runtime-<hash>` | `bundle.yml` (nginx config only) |
 | Assets | `ghcr.io/idleot/cdn-assets` | `publish-assets --push` |
 

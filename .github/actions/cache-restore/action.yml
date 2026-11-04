@@ -119,7 +119,7 @@ runs:
         set -euo pipefail
         # shellcheck source=../cache-common.sh
         source "${{ github.action_path }}/../cache-common.sh"
-        # Anonymous pull for public Soft packages (idleot tokens 403 cross-org).
+        # Anonymous pull for public qtclient packages (idleot tokens 403 cross-org).
         oras logout ghcr.io 2>/dev/null || true
         cache_oras_pull_vcpkg "$GHCR_IMAGE" "$TIP_TAG" "$DEST"
 

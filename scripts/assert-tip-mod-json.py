@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if tip mods/<id>/mod.json is not loadable by Soft ModLoader.
+"""Fail if tip mods/<id>/mod.json is not loadable by qtclient ModLoader.
 
 Catches merge-launcher-brand clobbering the pack meta with a launcher stub
 (name/priority/urls only — no id / QTCLIENT_MOD_API). Linked tip: no native/.

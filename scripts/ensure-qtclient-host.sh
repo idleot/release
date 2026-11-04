@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Ensure Soft (qtclient) published client-* ORAS for SHA. If any slice is
+# Ensure qtclient published client-* ORAS for SHA. If any slice is
 # missing, wait on an existing Client:ci for that SHA (push/PR/dispatch), or
 # dispatch Client:ci, then wait for ORAS.
 #
-# Usage: ensure-soft-host.sh <qtclient_sha> [release_id]
+# Usage: ensure-qtclient-host.sh <qtclient_sha> [release_id]
 # Env: GH_TOKEN, HOST_OWNER (default qtclient), QTCLIENT_REPO (default qtclient/qtclient)
 #
 # workflow_dispatch --ref must be a branch or tag name (not a bare SHA). When
 # SHA is tip of main/master we dispatch that branch; otherwise we create (or
-# reuse) tag soft-host-<12hex>. Prefer watching an in-flight Soft run so
-# Release does not need cross-org workflow dispatch rights when Soft already
-# built on push (typical after Soft PR merge).
+# reuse) tag qtclient-host-<12hex>. Prefer watching an in-flight qtclient run so
+# Release does not need cross-org workflow dispatch rights when qtclient already
+# built on push (typical after qtclient PR merge).
 set -euo pipefail
 
 SHA="${1:?qtclient sha}"
@@ -34,7 +34,7 @@ oras_present() {
   return 1
 }
 
-find_soft_run() {
+find_qtclient_run() {
   # Prefer in-progress/queued, else newest completed for this SHA (any event).
   gh run list -R "$QTCLIENT_REPO" -w ci-client.yml -L 40 \
     --json databaseId,headSha,status,conclusion,event \
@@ -45,13 +45,13 @@ find_soft_run() {
     "
 }
 
-watch_soft_run() {
+watch_qtclient_run() {
   local run_id=$1
-  echo "[soft-host] watching Soft run ${run_id}"
+  echo "[qtclient-host] watching qtclient run ${run_id}"
   gh run watch "$run_id" -R "$QTCLIENT_REPO" --interval 30 >/dev/null 2>&1 || true
   local conclusion
   conclusion="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json conclusion --jq .conclusion)"
-  echo "[soft-host] Client:ci: ${conclusion}"
+  echo "[qtclient-host] Client:ci: ${conclusion}"
   [[ "$conclusion" == "success" ]]
 }
 
@@ -64,9 +64,9 @@ dispatch_ref_for_sha() {
       return 0
     fi
   done
-  local tag="soft-host-${SHA:0:12}"
+  local tag="qtclient-host-${SHA:0:12}"
   if ! gh api "repos/${QTCLIENT_REPO}/git/ref/tags/${tag}" >/dev/null 2>&1; then
-    echo "[soft-host] creating tag ${tag} @ ${SHA}" >&2
+    echo "[qtclient-host] creating tag ${tag} @ ${SHA}" >&2
     gh api -X POST "repos/${QTCLIENT_REPO}/git/refs" \
       -f ref="refs/tags/${tag}" -f sha="$SHA" >/dev/null
   fi
@@ -76,48 +76,48 @@ dispatch_ref_for_sha() {
 missing=false
 for ref in "${need[@]}"; do
   if oras_present "$ref"; then
-    echo "[soft-host] present $ref"
+    echo "[qtclient-host] present $ref"
   else
-    echo "[soft-host] missing $ref"
+    echo "[qtclient-host] missing $ref"
     missing=true
   fi
 done
 
 if [[ "$missing" == true ]]; then
-  run_id="$(find_soft_run || true)"
+  run_id="$(find_qtclient_run || true)"
   if [[ -n "$run_id" ]]; then
     status="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json status,conclusion,event \
       --jq '"\(.event) \(.status) \(.conclusion)"')"
-    echo "[soft-host] reuse Client:ci ${run_id} (${status})${RELEASE_ID:+ for ${RELEASE_ID}}"
+    echo "[qtclient-host] reuse Client:ci ${run_id} (${status})${RELEASE_ID:+ for ${RELEASE_ID}}"
     if [[ "$status" == *" in_progress "* || "$status" == *" queued "* ]]; then
-      watch_soft_run "$run_id"
+      watch_qtclient_run "$run_id"
     else
       conclusion="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json conclusion --jq .conclusion)"
-      echo "[soft-host] Client:ci: ${conclusion}"
+      echo "[qtclient-host] Client:ci: ${conclusion}"
       [[ "$conclusion" == "success" ]]
     fi
   else
     ref="$(dispatch_ref_for_sha)"
-    echo "[soft-host] dispatching Client:ci @ ${ref} (${SHA})${RELEASE_ID:+ (${RELEASE_ID})}"
+    echo "[qtclient-host] dispatching Client:ci @ ${ref} (${SHA})${RELEASE_ID:+ (${RELEASE_ID})}"
     if ! gh workflow run ci-client.yml -R "$QTCLIENT_REPO" --ref "$ref"; then
-      echo "::error::failed to dispatch Soft Client:ci (need workflow scope on ${QTCLIENT_REPO}, or wait for Soft push CI)" >&2
+      echo "::error::failed to dispatch qtclient Client:ci (need workflow scope on ${QTCLIENT_REPO}, or wait for qtclient push CI)" >&2
       exit 1
     fi
     run_id=""
     for _ in $(seq 1 60); do
-      run_id="$(find_soft_run || true)"
+      run_id="$(find_qtclient_run || true)"
       [[ -n "$run_id" ]] && break
       sleep 5
     done
     if [[ -z "$run_id" ]]; then
-      echo "::error::could not find Client:ci for Soft ${SHA}" >&2
+      echo "::error::could not find Client:ci for qtclient ${SHA}" >&2
       exit 1
     fi
-    watch_soft_run "$run_id"
+    watch_qtclient_run "$run_id"
   fi
 fi
 
 for ref in "${need[@]}"; do
   bash "$SCRIPT_DIR/wait-ghcr-artifact.sh" "$ref" 7200 90
 done
-echo "[soft-host] all client-* ORAS ready for ${SHA}"
+echo "[qtclient-host] all client-* ORAS ready for ${SHA}"
