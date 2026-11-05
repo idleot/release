@@ -178,6 +178,7 @@ jobs:
           sparse-checkout: |
             scripts/lifecycle
             tools/publish
+            launcher/mods
           sparse-checkout-cone-mode: true
 
       - uses: oras-project/setup-oras@v1
@@ -472,7 +473,7 @@ jobs:
           rm -f "$RUNNER_TEMP/cert.p12"
           xattr -cr "$ENGINE_APP"
           codesign --force --deep --options runtime --timestamp \
-            --entitlements "$GITHUB_WORKSPACE/_qtclient/tools/publish/installer/idleot.entitlements" \
+            --entitlements "$GITHUB_WORKSPACE/_qtclient/tools/publish/installer/hardened-runtime.entitlements" \
             --sign "$MACOS_SIGN_IDENTITY" "$ENGINE_APP"
 
       - name: Notarize engine bundle
@@ -573,7 +574,7 @@ jobs:
           rm -f "$RUNNER_TEMP/launcher-cert.p12"
           xattr -cr "$app"
           codesign --force --deep --options runtime --timestamp \
-            --entitlements "$GITHUB_WORKSPACE/_qtclient/tools/publish/installer/idleot.entitlements" \
+            --entitlements "$GITHUB_WORKSPACE/_qtclient/tools/publish/installer/hardened-runtime.entitlements" \
             --sign "$MACOS_SIGN_IDENTITY" "$app"
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/IdleOT-launcher.zip"
           xcrun notarytool submit "$RUNNER_TEMP/IdleOT-launcher.zip" --apple-id "$APPLE_ID" \
