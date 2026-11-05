@@ -35,12 +35,13 @@ oras_present() {
 }
 
 find_qtclient_run() {
-  # Prefer in-progress/queued, else newest completed for this SHA (any event).
+  # Prefer live runs (pending/queued/in_progress), else newest for this SHA.
+  # "pending" is common right after push — must not be treated as terminal.
   gh run list -R "$QTCLIENT_REPO" -w ci-client.yml -L 40 \
     --json databaseId,headSha,status,conclusion,event \
     --jq "
       [.[] | select(.headSha == \"${SHA}\")] |
-      (map(select(.status == \"in_progress\" or .status == \"queued\")) + .) |
+      (map(select(.status == \"in_progress\" or .status == \"queued\" or .status == \"pending\" or .status == \"waiting\")) + .) |
       .[0].databaseId // empty
     "
 }
@@ -48,10 +49,25 @@ find_qtclient_run() {
 watch_qtclient_run() {
   local run_id=$1
   echo "[qtclient-host] watching qtclient run ${run_id}"
-  gh run watch "$run_id" -R "$QTCLIENT_REPO" --interval 30 >/dev/null 2>&1 || true
-  local conclusion
-  conclusion="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json conclusion --jq .conclusion)"
-  echo "[qtclient-host] Client:ci: ${conclusion}"
+  # gh run watch returns immediately on some pending states; poll until settled.
+  local status conclusion
+  for _ in $(seq 1 240); do
+    status="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json status --jq .status)"
+    conclusion="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json conclusion --jq '.conclusion // empty')"
+    if [[ "$status" == "completed" ]]; then
+      break
+    fi
+    # Also try watch once runners are live (no-op if still pending).
+    if [[ "$status" == "in_progress" || "$status" == "queued" ]]; then
+      gh run watch "$run_id" -R "$QTCLIENT_REPO" --interval 30 >/dev/null 2>&1 || true
+      conclusion="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json conclusion --jq '.conclusion // empty')"
+      status="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json status --jq .status)"
+      [[ "$status" == "completed" ]] && break
+    else
+      sleep 15
+    fi
+  done
+  echo "[qtclient-host] Client:ci: ${conclusion:-unknown} (status=${status})"
   [[ "$conclusion" == "success" ]]
 }
 
@@ -89,12 +105,13 @@ if [[ "$missing" == true ]]; then
     status="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json status,conclusion,event \
       --jq '"\(.event) \(.status) \(.conclusion)"')"
     echo "[qtclient-host] reuse Client:ci ${run_id} (${status})${RELEASE_ID:+ for ${RELEASE_ID}}"
-    if [[ "$status" == *" in_progress "* || "$status" == *" queued "* ]]; then
-      watch_qtclient_run "$run_id"
-    else
-      conclusion="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json conclusion --jq .conclusion)"
+    # pending/waiting/queued/in_progress → wait; only completed runs are terminal.
+    if [[ "$status" == *" completed "* ]]; then
+      conclusion="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json conclusion --jq '.conclusion // empty')"
       echo "[qtclient-host] Client:ci: ${conclusion}"
       [[ "$conclusion" == "success" ]]
+    else
+      watch_qtclient_run "$run_id"
     fi
   else
     ref="$(dispatch_ref_for_sha)"
