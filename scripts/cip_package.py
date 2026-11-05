@@ -362,14 +362,30 @@ def emit_cip(
             exe = executable_of(out, target.get("files"), "client")
         write_package(client_dir, version, exe, files, "second")
         assets_name = "assets-macos.json" if os_name == "macos" else "assets.json"
-        packages_builds.append({
+        build = {
             "os": os_name,
             "architecture": arch,
             "url": f"{cdn_url}/launcher/{client_dir_name}/package.json",
             "versionurl": f"{cdn_url}/launcher/{client_dir_name}/package.json.version",
             "assetsurl": f"{cdn_url}/launcher/assets-current/{assets_name}",
             "assetsversionurl": f"{cdn_url}/launcher/assets-current/assets.json.sha256",
-        })
+        }
+        # Non-CIP channels (gated by tip launcher mods clientmods / minimap).
+        if (out / "mods-current" / "mods.json").is_file():
+            build["modsurl"] = f"{cdn_url}/launcher/mods-current/mods.json"
+            build["modsversionurl"] = f"{cdn_url}/launcher/mods-current/mods.json.sha256"
+        elif (out / "mods.json").is_file():
+            build["modsurl"] = f"{cdn_url}/launcher/mods.json"
+            build["modsversionurl"] = f"{cdn_url}/launcher/mods.json.sha256"
+        if (out / "minimap-current" / "minimap.json").is_file():
+            build["minimapurl"] = f"{cdn_url}/launcher/minimap-current/minimap.json"
+            build["minimapversionurl"] = (
+                f"{cdn_url}/launcher/minimap-current/minimap.json.sha256"
+            )
+        elif (out / "minimap.json").is_file():
+            build["minimapurl"] = f"{cdn_url}/launcher/minimap.json"
+            build["minimapversionurl"] = f"{cdn_url}/launcher/minimap.json.sha256"
+        packages_builds.append(build)
 
     # IDLEOT_TIP_VARIANT selects which CipSoft variant this CDN tip advertises
     # as the installable package (production=regular, qa=test, remote-dev=beta).

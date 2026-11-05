@@ -228,8 +228,13 @@ jobs:
           fi
           bash _qtclient/scripts/lifecycle/lib/merge-launcher-brand.sh \
             --pack "_idleot-client/launcher" --tip "$tip"
+          bash _qtclient/scripts/lifecycle/lib/stage-default-launcher-mods.sh --tip "$tip"
           test -f "$tip/mods/idleot/brand.json" || {
             echo "::error::tip mods/idleot/brand.json missing after merge-launcher-brand" >&2
+            exit 1
+          }
+          test -f "$tip/mods/clientmods/launcher.json" || {
+            echo "::error::tip mods/clientmods/launcher.json missing" >&2
             exit 1
           }
           SITE="${IDLEOT_SITE_URL:-${TIBIA_SITE_URL:-https://www.idleot.com}}"
