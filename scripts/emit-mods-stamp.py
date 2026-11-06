@@ -31,9 +31,9 @@ def _hash_pack(pack: Path) -> tuple[str, list[dict], dict]:
     files: list[dict] = []
     h = hashlib.sha256()
     for path in sorted(p for p in pack.rglob("*") if p.is_file()):
-        # Skip build leftovers if someone pointed at a staged tree with lib/
+        # Skip stale archive leftovers; keep native/mod.* (runtime MODULE).
         rel = path.relative_to(pack).as_posix()
-        if rel.startswith("lib/") or rel.startswith("native/"):
+        if rel.startswith("lib/"):
             continue
         data = path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
