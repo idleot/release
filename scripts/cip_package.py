@@ -205,6 +205,55 @@ def cip_package_version(fallback: str = "0") -> str:
     return f"{cip}.{sha[:6]}"
 
 
+def emit_minimap_current(out: Path, assets_doc: dict) -> int:
+    """Build launcher/minimap-current from assets.json minimap tiles.
+
+    Tip launcher mods with capability \"minimap\" require minimapurl on each
+    package build. Without this tree, installMinimap is skipped and the game
+    sees an empty CipSoft Resources/minimap (unexplored map).
+    """
+    tip = out / "launcher" / "minimap-current"
+    tip.mkdir(parents=True, exist_ok=True)
+    files_out: list[dict] = []
+    h = hashlib.sha256()
+    for entry in assets_doc.get("files") or []:
+        local = str(entry.get("localfile") or "")
+        # assets store CIP tiles under data/things/<ver>/minimap/…
+        marker = "/minimap/"
+        idx = local.lower().find(marker)
+        if idx < 0:
+            continue
+        name = local[idx + len(marker) :]
+        # Flat Minimap_Color_* / Minimap_WaypointCost_* only.
+        if not name or "/" in name:
+            continue
+        dest_local = f"Contents/Resources/minimap/{name}"
+        url = str(entry.get("url") or "")
+        # Resolve packed blob via assets-current hardlink (same lzma bytes).
+        rel_url = f"../assets-current/{url}" if url else ""
+        rec = {
+            "url": rel_url,
+            "localfile": dest_local,
+            "packedhash": entry.get("packedhash"),
+            "packedsize": entry.get("packedsize"),
+            "unpackedhash": entry.get("unpackedhash"),
+            "unpackedsize": entry.get("unpackedsize"),
+        }
+        files_out.append(rec)
+        h.update(dest_local.encode())
+        h.update(b"\0")
+        h.update(str(entry.get("unpackedhash") or "").encode())
+        h.update(b"\0")
+    if not files_out:
+        print("[assemble] warning: no minimap tiles in assets.json — minimap channel omitted")
+        return 0
+    content_hash = h.hexdigest()
+    write_json(tip / "minimap.json", {"files": files_out, "contentHash": content_hash})
+    (tip / "minimap.json.sha256").write_text(content_hash + "\n", encoding="utf-8")
+    print(f"[assemble] minimap-current: {len(files_out)} tiles → {tip}")
+    return len(files_out)
+
+
 def write_package(directory: Path, version: str, executable: str, files: list[dict], generation: str | None) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     doc: dict = {"version": version, "files": files, "executable": executable}
@@ -280,6 +329,10 @@ def emit_cip(
         assets_bytes = (assets_dir / "assets.json").read_bytes()
         (assets_dir / "assets.json.sha256").write_text(sha256_bytes(assets_bytes))
         write_json(assets_dir / "assets-macos.json", assets_doc)
+
+    # Dedicated minimap channel (Contents/Resources/minimap) — assets.json alone
+    # keeps tiles under data/things/… which installAssets does not remap.
+    emit_minimap_current(out, assets_doc if isinstance(assets_doc, dict) else {})
 
     # CIP shows 15.33.c9e45e under Play — not a long dated/branch stamp.
     version = cip_package_version(release.get("revision") or "0")
