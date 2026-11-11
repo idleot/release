@@ -295,7 +295,11 @@ def main() -> int:
 
     if wasm:
         copy_tree(wasm / "client", out / "client")
-        sources["wasm"] = load_json(wasm / ".idleot" / "wasm.json") or sources["wasm"]
+        sources["wasm"] = (
+            load_json(wasm / ".idleot" / "wasm.json")
+            or load_json(wasm / ".qtclient" / "wasm.json")
+            or sources["wasm"]
+        )
         # Ensure a web target even when the wasm slice has no content-web v3 list
         # (engine-only / client tree). emit_cip needs targets.web.wasm for /play;
         # things is attached later via THINGS_TARGETS once the assets list is known.
