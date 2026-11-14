@@ -35,13 +35,19 @@ oras_present() {
 }
 
 find_qtclient_run() {
-  # Prefer live runs (pending/queued/in_progress), else newest for this SHA.
+  # Prefer live runs (pending/queued/in_progress), else newest successful
+  # completed run for this SHA. Skip completed failures so a bad prior
+  # Client:ci does not block re-dispatch / ORAS publish.
   # "pending" is common right after push — must not be treated as terminal.
   gh run list -R "$QTCLIENT_REPO" -w ci-client.yml -L 40 \
     --json databaseId,headSha,status,conclusion,event \
     --jq "
-      [.[] | select(.headSha == \"${SHA}\")] |
-      (map(select(.status == \"in_progress\" or .status == \"queued\" or .status == \"pending\" or .status == \"waiting\")) + .) |
+      [.[] | select(.headSha == \"${SHA}\")] as \$all |
+      (
+        \$all | map(select(.status == \"in_progress\" or .status == \"queued\" or .status == \"pending\" or .status == \"waiting\"))
+      ) + (
+        \$all | map(select(.status == \"completed\" and .conclusion == \"success\"))
+      ) |
       .[0].databaseId // empty
     "
 }
@@ -101,19 +107,28 @@ done
 
 if [[ "$missing" == true ]]; then
   run_id="$(find_qtclient_run || true)"
+  reuse=""
   if [[ -n "$run_id" ]]; then
     status="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json status,conclusion,event \
       --jq '"\(.event) \(.status) \(.conclusion)"')"
-    echo "[qtclient-host] reuse Client:ci ${run_id} (${status})${RELEASE_ID:+ for ${RELEASE_ID}}"
-    # pending/waiting/queued/in_progress → wait; only completed runs are terminal.
+    echo "[qtclient-host] found Client:ci ${run_id} (${status})${RELEASE_ID:+ for ${RELEASE_ID}}"
+    # pending/waiting/queued/in_progress → wait; completed success → done;
+    # completed failure → fall through and dispatch a fresh Client:ci.
     if [[ "$status" == *" completed "* ]]; then
       conclusion="$(gh run view "$run_id" -R "$QTCLIENT_REPO" --json conclusion --jq '.conclusion // empty')"
-      echo "[qtclient-host] Client:ci: ${conclusion}"
-      [[ "$conclusion" == "success" ]]
+      if [[ "$conclusion" == "success" ]]; then
+        reuse=1
+        echo "[qtclient-host] Client:ci: ${conclusion}"
+      else
+        echo "[qtclient-host] prior Client:ci ${conclusion} — dispatching a new run"
+        run_id=""
+      fi
     else
+      reuse=1
       watch_qtclient_run "$run_id"
     fi
-  else
+  fi
+  if [[ -z "$reuse" ]]; then
     ref="$(dispatch_ref_for_sha)"
     echo "[qtclient-host] dispatching Client:ci @ ${ref} (${SHA})${RELEASE_ID:+ (${RELEASE_ID})}"
     if ! gh workflow run ci-client.yml -R "$QTCLIENT_REPO" --ref "$ref"; then
@@ -123,6 +138,7 @@ if [[ "$missing" == true ]]; then
     run_id=""
     for _ in $(seq 1 60); do
       run_id="$(find_qtclient_run || true)"
+      # Prefer the newest non-failed / in-flight run after dispatch.
       [[ -n "$run_id" ]] && break
       sleep 5
     done
