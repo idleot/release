@@ -432,21 +432,21 @@ jobs:
           fi
           # Re-fingerprint after URL stamp so /play OPFS sees the tip bytes.
           python3 - "$tip_pack" <<'PY'
-import hashlib, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-h = hashlib.sha256()
-for path in sorted(root.rglob("*")):
-    if not path.is_file():
-        continue
-    rel = path.relative_to(root).as_posix()
-    if rel in {".pack.stamp", ".files.manifest"}:
-        continue
-    h.update(rel.encode()); h.update(b"\0")
-    h.update(path.read_bytes()); h.update(b"\0")
-(root / ".pack.stamp").write_text(h.hexdigest() + "\n")
-print("[pack] .pack.stamp", h.hexdigest()[:16])
-PY
+          import hashlib, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          h = hashlib.sha256()
+          for path in sorted(root.rglob("*")):
+              if not path.is_file():
+                  continue
+              rel = path.relative_to(root).as_posix()
+              if rel in {".pack.stamp", ".files.manifest"}:
+                  continue
+              h.update(rel.encode()); h.update(b"\0")
+              h.update(path.read_bytes()); h.update(b"\0")
+          (root / ".pack.stamp").write_text(h.hexdigest() + "\n")
+          print("[pack] .pack.stamp", h.hexdigest()[:16])
+          PY
 
       - name: Save vcpkg + ccache
         if: always()
