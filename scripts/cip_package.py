@@ -218,7 +218,7 @@ def emit_minimap_current(out: Path, assets_doc: dict) -> int:
     h = hashlib.sha256()
     for entry in assets_doc.get("files") or []:
         local = str(entry.get("localfile") or "")
-        # assets store CIP tiles under data/things/<ver>/minimap/…
+        # assets list CIP tiles under …/minimap/…
         marker = "/minimap/"
         idx = local.lower().find(marker)
         if idx < 0:
@@ -331,7 +331,7 @@ def emit_cip(
         write_json(assets_dir / "assets-macos.json", assets_doc)
 
     # Dedicated minimap channel (Contents/Resources/minimap) — assets.json alone
-    # keeps tiles under data/things/… which installAssets does not remap.
+    # keeps tiles out of Contents/Resources/minimap, which installAssets does not remap.
     emit_minimap_current(out, assets_doc if isinstance(assets_doc, dict) else {})
 
     # CIP shows 15.33.c9e45e under Play — not a long dated/branch stamp.
