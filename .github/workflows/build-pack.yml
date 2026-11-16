@@ -191,20 +191,38 @@ jobs:
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
           export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
           bash scripts/lifecycle/build/desktop.sh
+          # Launcher installer needs bin/launcher next to the client in the linked tip.
+          bash scripts/lifecycle/build/desktop.sh --launcher
           bin="$(bash scripts/lifecycle/lib/find-client-bin.sh . 2>/dev/null || true)"
           [[ -n "$bin" && -e "$bin" ]] || {
             echo "::error::linked tip client binary missing after qtclient desktop build" >&2
             exit 1
           }
           tip="$(dirname "$bin")"
+          # find-client-bin may land inside *.app/Contents/MacOS — package wants bin/.
+          case "$tip" in
+            *.app/Contents/MacOS) tip="$(cd "$tip/../../.." && pwd)" ;;
+          esac
           pack="$tip/mods/idleot"
-          [[ -f "$pack/mod.json" ]] || {
+          if [[ ! -f "$pack/mod.json" ]]; then
+            # macOS: mods live under client.app/Contents/MacOS/mods/idleot
+            pack="$(find "$tip" -path '*/mods/idleot/mod.json' 2>/dev/null | head -1 | xargs dirname || true)"
+          fi
+          [[ -n "${pack:-}" && -f "$pack/mod.json" ]] || {
             echo "::error::linked tip mods/idleot/mod.json missing" >&2
             find "$tip" -path '*/mods/*' 2>/dev/null | head -40 || true
             exit 1
           }
           if [[ -d "$pack/native" ]]; then
             echo "::error::native/ must not ship on linked tip" >&2
+            exit 1
+          fi
+          # Stamp tip pack URLs before packaging so linked-tip ships production bases.
+          python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));d.pop('native',None);u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped tip',u['loginBase'],u['assetBase'])" \
+            "$pack/mod.json" "$TIBIA_SITE_URL" "$TIBIA_ASSET_BASE" "$QTCLIENT_PAYMENTS_URL"
+          if grep -q '127.0.0.1' "$pack/mod.json"; then
+            echo "::error::tip pack mod.json still has 127.0.0.1 after stamp" >&2
+            cat "$pack/mod.json" >&2
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/pack"
@@ -214,18 +232,19 @@ jobs:
           # Also stage tip root marker so assemble can prefer linked qtclient tip.
           mkdir -p "$RUNNER_TEMP/pack/linked-tip-meta"
           echo "$tip" >"$RUNNER_TEMP/pack/linked-tip-meta/tip-dir.txt"
-          python3 -c "import json,sys;p,s,a,pay=sys.argv[1:5];d=json.load(open(p));d.pop('native',None);u=d.setdefault('urls',{});u['loginBase']=s.rstrip('/');u['assetBase']=a.rstrip('/');u['paymentsBase']=pay.rstrip('/');json.dump(d,open(p,'w'),indent=2);open(p,'a').write('\\n');print('[pack] stamped',u['loginBase'],u['assetBase'])" \
-            "$RUNNER_TEMP/pack/idleot/mod.json" "$TIBIA_SITE_URL" "$TIBIA_ASSET_BASE" "$QTCLIENT_PAYMENTS_URL"
-          if grep -q '127.0.0.1' "$RUNNER_TEMP/pack/idleot/mod.json"; then
-            echo "::error::pack mod.json still has 127.0.0.1 after stamp" >&2
-            cat "$RUNNER_TEMP/pack/idleot/mod.json" >&2
-            exit 1
-          fi
-          # Package qtclient desktop tip (engine + mods) for assemble.
+          # Package qtclient desktop tip (engine + mods + launcher) for assemble.
           PACKAGE_OUT="$RUNNER_TEMP/pack/linked-tip" \
             QTCLIENT_PLATFORM="${{ matrix.plat }}" \
             PLATFORM="${{ matrix.plat }}" \
             bash scripts/lifecycle/package/desktop.sh
+          # Fail early if launcher did not land in the linked tip (assemble needs it).
+          if [[ ! -e "$RUNNER_TEMP/pack/linked-tip/bin/launcher" \
+             && ! -e "$RUNNER_TEMP/pack/linked-tip/bin/launcher.exe" \
+             && ! -d "$RUNNER_TEMP/pack/linked-tip/bin/launcher.app" ]]; then
+            echo "::error::linked tip missing bin/launcher after package/desktop.sh" >&2
+            ls -la "$RUNNER_TEMP/pack/linked-tip/bin" 2>/dev/null || true
+            exit 1
+          fi
           # Phase 3: pack archive (.a + FS) for QTCLIENT_LINKED_PACK_LIBS tip link.
           build_dir=""
           while IFS= read -r libdir; do

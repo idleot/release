@@ -389,6 +389,10 @@ jobs:
             find "$tip" -path '*/mods/idleot/*' 2>/dev/null | head -40 >&2 || true
             exit 1
           }
+          # Linked tip carries pack-build mod.json (often 127.0.0.1). Stamp the tip
+          # tree itself — pack/idleot FS chrome was stamped above but is not shipped.
+          python3 scripts/stamp-mod-urls.py "$pack_tip/mod.json" \
+            --site "$SITE" --asset "$ASSET" --payments "$PAY"
           python3 scripts/assert-tip-mod-json.py "$pack_tip/mod.json"
           # Stamp all packs under tip mods/ (multi-pack channel).
           python3 scripts/emit-mods-stamp.py "$(dirname "$pack_tip")" "$(dirname "$(dirname "$pack_tip")")"
