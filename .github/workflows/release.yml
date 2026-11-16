@@ -344,10 +344,15 @@ jobs:
           }
           live="$(bash scripts/deployctl get-image cdn || true)"
           skipped_deploy=0
-          if [[ "$live" == "$RUNTIME_TAG" || "$live" == "runtime" ]]; then
+          # Exact content-hash match only. Floating "runtime" (compose default)
+          # must never skip: :runtime is retagged on every Bundle, so nginx.conf
+          # bumps would otherwise never pull (extras CORS stayed broken through
+          # v1.0.196 while tip/html flipped fine).
+          if [[ -n "$RUNTIME_TAG" && "$live" == "$RUNTIME_TAG" ]]; then
             echo "[compose] runtime already ${live} — skip image deploy"
             skipped_deploy=1
           else
+            echo "[compose] live=${live:-none} want=${RUNTIME_TAG} — deploy"
             bash scripts/deployctl deploy cdn "$RUNTIME_TAG"
           fi
           if ! wait_mount; then
