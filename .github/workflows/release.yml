@@ -530,8 +530,9 @@ jobs:
     timeout-minutes: 10
     environment: release
     steps:
-      # Release-owned packages (crystalserver/cdn/tips) accept GITHUB_TOKEN.
-      # Private portal is linked to idleot/portal — needs RELEASE_TOKEN (re-login below).
+      # Release-owned packages accept GITHUB_TOKEN. Private portal is linked to
+      # idleot/portal — neither GITHUB_TOKEN nor RELEASE_TOKEN can imagetools it
+      # from here; dispatch build-image.yml latest=true so portal's own token retags.
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -563,23 +564,17 @@ jobs:
           fi
           true
 
-      - name: Login to GHCR (portal package)
+      - uses: actions/checkout@v5
         if: needs.deploy-portal.result == 'success'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.RELEASE_TOKEN }}
 
-      - name: Move portal :latest
+      - name: Move portal :latest (in idleot/portal)
         if: needs.deploy-portal.result == 'success'
         env:
-          PORTAL_SHA: ${{ needs.resolve.outputs.portal_sha }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          docker buildx imagetools create \
-            -t "$REGISTRY/portal:latest" \
-            "$REGISTRY/portal:$PORTAL_SHA"
-          echo "portal:$PORTAL_SHA -> latest"
+          bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/portal" build-image.yml \
+            "${{ needs.resolve.outputs.release_id }}-latest" \
+            "ref=${{ needs.resolve.outputs.portal_sha }}" "latest=true"
 
       - name: GitHub Release on the umbrella tag
         if: needs.resolve.outputs.is_tag == 'true'
