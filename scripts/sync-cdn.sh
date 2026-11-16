@@ -195,7 +195,8 @@ push_blobs() {
       fi
     done
   fi
-  for d in installers assets images; do
+  # extras/ = loose Magical Archive JSON for /play (spells.json + spells-previews.json).
+  for d in installers assets images extras; do
     push_mutable "$d"
   done
 }

@@ -361,6 +361,32 @@ def main() -> int:
             (out / ".idleot" / "reuse-assets").write_text(new_assets_rev + "\n")
         else:
             things = import_things(assets, out) or things
+        # Loose /extras for /play Magical Archive (portal ensureSpellsExtrasFromCdn).
+        # Prefer the assets slice; fall back to release-vendored extras/ for older
+        # cdn-assets images that predate the extras publish.
+        extras_src = assets / "extras"
+        if extras_src.is_dir() and (extras_src / "spells-previews.json").is_file():
+            copy_tree(extras_src, out / "extras")
+            print("[assemble] extras/ ← assets slice (spells*.json for /play)")
+        else:
+            for name in ("spells.json", "spells-previews.json"):
+                for cand in (
+                    assets / "Contents" / "Resources" / "assets" / name,
+                    Path(__file__).resolve().parent.parent / "extras" / name,
+                ):
+                    if cand.is_file():
+                        dest = out / "extras" / name
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(cand, dest)
+                        break
+            if (out / "extras" / "spells-previews.json").is_file():
+                print("[assemble] extras/ ← Contents/assets or release/extras")
+    elif not assets:
+        # No assets slice this cut — still ship vendored extras for /play.
+        vendored = Path(__file__).resolve().parent.parent / "extras"
+        if (vendored / "spells-previews.json").is_file():
+            copy_tree(vendored, out / "extras")
+            print("[assemble] extras/ ← release/extras (no assets slice)")
     for name in THINGS_TARGETS:
         if name in release["targets"]:
             if things:
@@ -448,6 +474,12 @@ def main() -> int:
         raise SystemExit(
             f"[assemble] refusing release without web.things list "
             f"(things={things_rel!r}) — /play Update needs content-things.json"
+        )
+    previews = out / "extras" / "spells-previews.json"
+    if not previews.is_file():
+        raise SystemExit(
+            "[assemble] refusing release without extras/spells-previews.json — "
+            "republish cdn-assets (make -C apps/qtclient publish-assets ARGS='things --push')"
         )
 
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
