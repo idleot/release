@@ -530,14 +530,14 @@ jobs:
     timeout-minutes: 10
     environment: release
     steps:
-      # RELEASE_TOKEN: GITHUB_TOKEN cannot HEAD private ghcr.io/idleot/portal
-      # (package linked to idleot/portal). Same PAT already used for portal dispatch.
+      # Release-owned packages (crystalserver/cdn/tips) accept GITHUB_TOKEN.
+      # Private portal is linked to idleot/portal — needs RELEASE_TOKEN (re-login below).
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.RELEASE_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Move :latest to what is live
         env:
@@ -562,6 +562,14 @@ jobs:
             [[ -n "$RUNTIME_TAG" ]] && retag cdn "$RUNTIME_TAG"
           fi
           true
+
+      - name: Login to GHCR (portal package)
+        if: needs.deploy-portal.result == 'success'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Move portal :latest
         if: needs.deploy-portal.result == 'success'
