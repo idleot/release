@@ -116,31 +116,29 @@ jobs:
           CDN_REMOTE_ROOT: ${{ vars.CDN_REMOTE_ROOT || '/data/idleot-cdn' }}
         run: |
           # latest/ + releases/ (~MBs). Assets tip sprites stay on the host —
-          # only pull the CIP stamp files so assemble can decide reuse vs re-lzma
-          # (rsync of the full assets-current tree hung v1.0.63 for hours).
+          # only pull the CIP stamp files so assemble can decide reuse vs re-lzma.
+          # One tar stream beats thousands of small-file rsync round-trips.
           mkdir -p slices/previous
           CDN_SSH_USER="${CDN_SSH_USER:-root}"
           if [[ -n "${CDN_SSH_HOST:-}" && -n "${CDN_SSH_KEY:-}" ]]; then
             KEY_FILE="$RUNNER_TEMP/cdn_ssh_key"
             umask 077
             printf '%s\n' "$CDN_SSH_KEY" > "$KEY_FILE"
-            RSYNC_SSH="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
-            for d in latest releases; do
-              rsync -a -e "$RSYNC_SSH" \
-                "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${d}/" "slices/previous/${d}/" \
-                || echo "::warning::no remote ${d}/ — assembling without it"
-            done
+            SSH=(ssh -i "$KEY_FILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+            if ! "${SSH[@]}" "${CDN_SSH_USER}@${CDN_SSH_HOST}" \
+              "cd '${CDN_REMOTE_ROOT}/html' && tar -czf - \
+                latest releases hints.json \
+                launcher/assets-current/assets.json \
+                launcher/assets-current/assets-macos.json \
+                launcher/assets-current/assets.json.sha256 \
+                2>/dev/null" \
+              | tar -xzf - -C slices/previous; then
+              echo "::warning::no remote previous manifests — assembling without them"
+            fi
             mkdir -p slices/previous/launcher/assets-current
-            rsync -a -e "$RSYNC_SSH" \
-              "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/assets-current/assets.json" \
-              "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/assets-current/assets-macos.json" \
-              "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/assets-current/assets.json.sha256" \
-              "slices/previous/launcher/assets-current/" \
-              || echo "::warning::no remote assets-current stamps — will re-pack assets"
-            # Optional tip-of-day root file for continuity.
-            rsync -a -e "$RSYNC_SSH" \
-              "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/hints.json" slices/previous/hints.json \
-              2>/dev/null || true
+            if [[ ! -f slices/previous/launcher/assets-current/assets.json ]]; then
+              echo "::warning::no remote assets-current stamps — will re-pack assets"
+            fi
           else
             echo "::notice::CDN_SSH_* unset — cold assemble from slices only"
           fi

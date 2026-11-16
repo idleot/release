@@ -164,13 +164,16 @@ push_blobs() {
           replace_tree "launcher/assets-current"
         fi
       elif [[ -d "$child" && "$name" == *-current ]]; then
-        # Never overwrite a live tip with an empty stub (package.json only).
-        if ! compgen -G "${child}/*.wasm" >/dev/null \
-          && ! compgen -G "${child}/tibia.js" >/dev/null \
-          && ! compgen -G "${child}/launcher.js" >/dev/null; then
-          echo "[sync-cdn] skip empty tip launcher/${name} (no wasm/js) — leave host alone"
-        else
+        # Never overwrite a live tip with an empty stub.
+        # WASM tips need tibia.js / launcher.js / *.wasm. Tile tips (minimap-current)
+        # ship minimap.json (+ tiles) without wasm — do not treat those as empty.
+        if [[ -f "${child}/minimap.json" ]] \
+          || compgen -G "${child}/*.wasm" >/dev/null \
+          || compgen -G "${child}/tibia.js" >/dev/null \
+          || compgen -G "${child}/launcher.js" >/dev/null; then
           replace_tree "launcher/${name}"
+        else
+          echo "[sync-cdn] skip empty tip launcher/${name} (no wasm/js/minimap) — leave host alone"
         fi
       elif [[ -d "$child" ]]; then
         remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher/${name}'"

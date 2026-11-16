@@ -1,7 +1,7 @@
 ---
 # Assemble release client slices from qtclient+IdleOT linked tips built in build-pack.
-# qtclient stock host may still be ensured for desktop qtclient ORAS fallbacks; product
-# wasm tip is the linked tip artifact (STATIC IdleOT — no SIDE_MODULE merge).
+# Pack builds need client-sdk only (ensure-qtclient-host). Desktop + wasm tips are the
+# linked-tip artifacts (STATIC IdleOT — no stock-ORAS merge fallback).
 #
 # Tip images: otclient-wasm / tibia-desktop tagged by qtclient+pack
 #   (${idleot_client_sha}-host-${qtclient_sha}) and aliased to :${qtclient_sha}.
@@ -72,7 +72,7 @@ jobs:
   check:
     name: Ensure qtclient host + tip plan
     runs-on: ubuntu-latest
-    timeout-minutes: 130
+    timeout-minutes: 45
     outputs:
       wasm: ${{ steps.exists.outputs.wasm }}
       desktop: ${{ steps.exists.outputs.desktop }}
@@ -335,6 +335,12 @@ jobs:
           name: pack-idleot-${{ matrix.platform }}
           path: ${{ runner.temp }}/pack/idleot
 
+      - name: Download linked tip artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pack-linked-tip-${{ matrix.platform }}
+          path: ${{ runner.temp }}/pack/linked-tip
+
       - name: Stage linked desktop tip + brand
         shell: bash
         run: |
@@ -357,15 +363,9 @@ jobs:
             [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
             echo "[assemble] using linked qtclient tip from pack artifact"
           else
-            oras logout ghcr.io 2>/dev/null || true
-            bash scripts/pull-oras-dir.sh \
-              "ghcr.io/${HOST_OWNER}/client-${{ matrix.platform }}:${SHA}" \
-              "$RUNNER_TEMP/client"
-            tip="$RUNNER_TEMP/client/engine"
-            [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
-            echo "::warning::linked-tip missing — merging FS onto qtclient ORAS tip (C++ may be absent)" >&2
-            bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
-              --pack "$pack" --tip "$tip" --platform "${{ matrix.platform }}"
+            echo "::error::linked-tip missing for ${{ matrix.platform }} — desktop must ship IdleOT C++ from the pack build" >&2
+            find "$RUNNER_TEMP/pack" -maxdepth 3 -type d 2>/dev/null | head -40 >&2 || true
+            exit 1
           fi
           # Ensure FS chrome + brand on tip (linked tip already has mods/idleot).
           if [[ ! -f "$tip/mods/idleot/mod.json" ]] && \

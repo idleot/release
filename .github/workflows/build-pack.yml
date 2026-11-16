@@ -150,7 +150,7 @@ jobs:
           scope: pack
           vcpkg_json: _qtclient/vcpkg.json
           ghcr_vcpkg: ghcr.io/qtclient/vcpkg-cache
-          unique: ${{ github.sha }}
+          unique: ${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}
 
       - name: qtclient host bootstrap (deps + vcpkg + CIP Qt)
         shell: bash
@@ -252,15 +252,23 @@ jobs:
           scope: pack
           vcpkg_json: _qtclient/vcpkg.json
           ghcr_vcpkg: ''
-          unique: ${{ github.sha }}
+          unique: ${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}
           vcpkg_cache_hit: ${{ steps.cache.outputs.vcpkg-cache-hit }}
           ccache_hit: ${{ steps.cache.outputs.ccache-hit }}
 
-      - name: Upload pack artifact
+      - name: Upload pack artifact (FS chrome)
         uses: actions/upload-artifact@v4
         with:
           name: pack-idleot-${{ matrix.plat }}
           path: ${{ runner.temp }}/pack/idleot
+          retention-days: 2
+          include-hidden-files: true
+
+      - name: Upload linked tip (engine + mods)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-linked-tip-${{ matrix.plat }}
+          path: ${{ runner.temp }}/pack/linked-tip
           retention-days: 2
           include-hidden-files: true
 
@@ -273,23 +281,6 @@ jobs:
           path: ${{ runner.temp }}/pack/archive-idleot
           retention-days: 2
           include-hidden-files: true
-          if-no-files-found: ignore
-
-      - name: Pack ccache
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$CCACHE_DIR"
-          tar -C "$CCACHE_DIR" -cf - . | zstd -T0 -3 -o "ccache-pack-${{ matrix.os_slug }}-${{ github.sha }}.tar.zst"
-
-      - name: Upload ccache artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-pack-${{ matrix.os_slug }}-${{ github.sha }}
-          path: ccache-pack-${{ matrix.os_slug }}-${{ github.sha }}.tar.zst
-          retention-days: 14
           if-no-files-found: ignore
 
       - name: Login GHCR (oras) for idleot push
@@ -373,7 +364,7 @@ jobs:
           scope: pack
           vcpkg_json: _qtclient/vcpkg.json
           ghcr_vcpkg: ghcr.io/qtclient/vcpkg-cache
-          unique: ${{ github.sha }}
+          unique: ${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}
 
       - name: qtclient host bootstrap (deps + vcpkg + CIP Qt wasm)
         working-directory: _qtclient
@@ -439,6 +430,23 @@ jobs:
             cat "$tip_pack/mod.json" >&2
             exit 1
           fi
+          # Re-fingerprint after URL stamp so /play OPFS sees the tip bytes.
+          python3 - "$tip_pack" <<'PY'
+import hashlib, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+h = hashlib.sha256()
+for path in sorted(root.rglob("*")):
+    if not path.is_file():
+        continue
+    rel = path.relative_to(root).as_posix()
+    if rel in {".pack.stamp", ".files.manifest"}:
+        continue
+    h.update(rel.encode()); h.update(b"\0")
+    h.update(path.read_bytes()); h.update(b"\0")
+(root / ".pack.stamp").write_text(h.hexdigest() + "\n")
+print("[pack] .pack.stamp", h.hexdigest()[:16])
+PY
 
       - name: Save vcpkg + ccache
         if: always()
@@ -450,7 +458,7 @@ jobs:
           scope: pack
           vcpkg_json: _qtclient/vcpkg.json
           ghcr_vcpkg: ''
-          unique: ${{ github.sha }}
+          unique: ${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}
           vcpkg_cache_hit: ${{ steps.cache.outputs.vcpkg-cache-hit }}
           ccache_hit: ${{ steps.cache.outputs.ccache-hit }}
 
@@ -462,21 +470,6 @@ jobs:
           retention-days: 2
           include-hidden-files: true
 
-      - name: Pack ccache
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$CCACHE_DIR"
-          tar -C "$CCACHE_DIR" -cf - . | zstd -T0 -3 -o "ccache-pack-wasm-${{ github.sha }}.tar.zst"
-
-      - name: Upload ccache artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-pack-wasm-${{ github.sha }}
-          path: ccache-pack-wasm-${{ github.sha }}.tar.zst
-          retention-days: 14
-          if-no-files-found: ignore
 
       - name: Login GHCR (oras) for idleot push
         run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin

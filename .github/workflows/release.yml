@@ -561,16 +561,15 @@ jobs:
           fi
           true
 
-      - uses: actions/checkout@v5
-        if: needs.deploy-portal.result == 'success'
-
-      - name: Move portal :latest (in idleot/portal)
+      - name: Move portal :latest
         if: needs.deploy-portal.result == 'success'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PORTAL_SHA: ${{ needs.resolve.outputs.portal_sha }}
         run: |
-          bash scripts/dispatch-and-wait.sh "${{ github.repository_owner }}/portal" build-image.yml \
-            "${{ needs.resolve.outputs.release_id }}-latest" "ref=${{ needs.resolve.outputs.portal_sha }}" "latest=true"
+          docker buildx imagetools create \
+            -t "$REGISTRY/portal:latest" \
+            "$REGISTRY/portal:$PORTAL_SHA"
+          echo "portal:$PORTAL_SHA -> latest"
 
       - name: GitHub Release on the umbrella tag
         if: needs.resolve.outputs.is_tag == 'true'
