@@ -34,14 +34,15 @@ _ROOT = Path(__file__).resolve().parents[2]
 OTC = _ROOT / "qtclient" if (_ROOT / "qtclient").is_dir() else _ROOT / "otclient"
 
 # Tip packages[].directoryname → packages/<name>/ on disk (also used as name).
-# CipSoft uses name "Tibia" + directoryname "Tibia.app"; IdleOT uses IdleOT.app for both.
+# CipSoft: "Tibia" — packages/Tibia on Linux/Windows, packages/Tibia.app on macOS
+# (the launcher adds .app there). See docs/reverse-engineering/cip-package-layout.md.
 # CipSoft tip variants: regular | preview | test | beta (no "local" — local skips launcher).
-CLIENT_PACKAGE_DIR = "IdleOT.app"
+CLIENT_PACKAGE_DIR = "IdleOT"
 CLIENT_VARIANTS = {
-    "regular": "IdleOT.app",
-    "test": "IdleOTTest.app",  # qa
-    "beta": "IdleOTBeta.app",  # remote development
-    "preview": "IdleOTPreview.app",  # reserved for a future preview world
+    "regular": "IdleOT",
+    "test": "IdleOTTest",  # qa
+    "beta": "IdleOTBeta",  # remote development
+    "preview": "IdleOTPreview",  # reserved for a future preview world
 }
 
 # (os, architecture field, v3 engine target or "web", launcher dir, client dir)
@@ -67,7 +68,7 @@ INSTALLER_PLATFORM = {
 
 LAUNCHER_EXECUTABLE = {
     "windows": "IdleOT.exe",
-    "macos": "IdleOT.app/Contents/MacOS/IdleOT",
+    "macos": "Contents/MacOS/IdleOT",
     "linux": "idleot-launcher",
 }
 
@@ -205,53 +206,78 @@ def cip_package_version(fallback: str = "0") -> str:
     return f"{cip}.{sha[:6]}"
 
 
-def emit_minimap_current(out: Path, assets_doc: dict) -> int:
-    """Build launcher/minimap-current from assets.json minimap tiles.
+# CipSoft asset layouts (docs/reverse-engineering/cip-package-layout.md):
+# assets.json (Windows, Linux, web) installs at the package root next to bin/,
+# assets-macos.json inside the bundle.
+ASSET_LAYOUTS = {
+    "assets.json": {"resources": "", "bin": "bin/"},
+    "assets-macos.json": {"resources": "Contents/Resources/", "bin": "Contents/MacOS/"},
+}
 
-    Tip launcher mods with capability \"minimap\" require minimapurl on each
-    package build. Without this tree, installMinimap is skipped and the game
-    sees an empty CipSoft Resources/minimap (unexplored map).
+
+def asset_role(localfile: str) -> tuple[str, str] | None:
+    """(role, name) of a things-list file: assets / sounds / fonts / rcc / minimap.
+
+    The things list is CipSoft's macOS layout (publish_assets.sh); slices
+    published before it carry data/things/<ver>/, data/sounds/<ver>/, data/fonts/.
+    Either reads the same.
     """
-    tip = out / "launcher" / "minimap-current"
-    tip.mkdir(parents=True, exist_ok=True)
-    files_out: list[dict] = []
-    h = hashlib.sha256()
-    for entry in assets_doc.get("files") or []:
-        local = str(entry.get("localfile") or "")
-        # assets list CIP tiles under …/minimap/…
-        marker = "/minimap/"
-        idx = local.lower().find(marker)
-        if idx < 0:
+    path = localfile.lstrip("/")
+    for prefix in ("Contents/Resources/", ""):
+        if prefix and not path.startswith(prefix):
             continue
-        name = local[idx + len(marker) :]
-        # Flat Minimap_Color_* / Minimap_WaypointCost_* only.
-        if not name or "/" in name:
-            continue
-        dest_local = f"Contents/Resources/minimap/{name}"
-        url = str(entry.get("url") or "")
-        # Resolve packed blob via assets-current hardlink (same lzma bytes).
-        rel_url = f"../assets-current/{url}" if url else ""
-        rec = {
-            "url": rel_url,
-            "localfile": dest_local,
-            "packedhash": entry.get("packedhash"),
-            "packedsize": entry.get("packedsize"),
-            "unpackedhash": entry.get("unpackedhash"),
-            "unpackedsize": entry.get("unpackedsize"),
-        }
-        files_out.append(rec)
-        h.update(dest_local.encode())
-        h.update(b"\0")
-        h.update(str(entry.get("unpackedhash") or "").encode())
-        h.update(b"\0")
-    if not files_out:
-        print("[assemble] warning: no minimap tiles in assets.json — minimap channel omitted")
-        return 0
-    content_hash = h.hexdigest()
-    write_json(tip / "minimap.json", {"files": files_out, "contentHash": content_hash})
-    (tip / "minimap.json.sha256").write_text(content_hash + "\n", encoding="utf-8")
-    print(f"[assemble] minimap-current: {len(files_out)} tiles → {tip}")
-    return len(files_out)
+        rest = path[len(prefix):]
+        if rest.startswith("assets/fonts/"):
+            return ("fonts", rest[len("assets/fonts/"):])
+        for role in ("assets", "sounds", "minimap"):
+            if rest.startswith(role + "/"):
+                return (role, rest[len(role) + 1:])
+        if prefix:
+            break
+    if path.endswith("graphics_resources.rcc"):
+        return ("rcc", "graphics_resources.rcc")
+    parts = path.split("/")
+    if len(parts) >= 4 and parts[0] == "data" and parts[1] in ("things", "sounds"):
+        rest = "/".join(parts[3:])
+        if parts[1] == "sounds":
+            return ("sounds", rest)
+        if rest.startswith("minimap/"):
+            return ("minimap", rest[len("minimap/"):])
+        return ("assets", rest)
+    if len(parts) >= 3 and parts[:2] == ["data", "fonts"]:
+        return ("fonts", "/".join(parts[2:]))
+    return None
+
+
+def asset_localfile(role: str, name: str, layout: dict[str, str]) -> str:
+    res = layout["resources"]
+    if role == "rcc":
+        return layout["bin"] + name
+    if role == "fonts":
+        return f"{res}assets/fonts/{name}"
+    return f"{res}{role}/{name}"
+
+
+def write_asset_lists(assets_dir: Path, records: list[dict]) -> dict:
+    """Write assets.json + assets-macos.json (+ sha256) from one record set.
+
+    CipSoft ships its map tiles in the asset list too; ours land in Resources'
+    minimap/ (the client's default tiles), the sibling of assets/. Returns the
+    assets-macos.json document.
+    """
+    docs: dict[str, dict] = {}
+    for name, layout in ASSET_LAYOUTS.items():
+        files = []
+        for rec in records:
+            role = asset_role(str(rec.get("localfile") or ""))
+            if role is None:
+                raise SystemExit(f"[assemble] things file outside CipSoft's layout: {rec.get('localfile')}")
+            files.append({**rec, "localfile": asset_localfile(role[0], role[1], layout)})
+        docs[name] = {"files": files}
+        write_json(assets_dir / name, docs[name])
+    # One version for both lists (the launcher compares assets.json.sha256).
+    (assets_dir / "assets.json.sha256").write_text(sha256_bytes((assets_dir / "assets.json").read_bytes()))
+    return docs["assets-macos.json"]
 
 
 def write_package(directory: Path, version: str, executable: str, files: list[dict], generation: str | None) -> None:
@@ -295,11 +321,11 @@ def pack_tree(out: Path, package_dir: Path, tree: Path) -> list[dict]:
     return records
 
 
-# The web client package has the macOS bundle layout CipSoft's package has:
-# the engine in Contents/MacOS (as Contents/MacOS/client), assets in
-# Contents/Resources. /play runs the engine from there (argv[0]), so the
-# client's applicationDirPath() lookups (../Resources, mods/) work unchanged.
-WEB_CLIENT_BIN = "Contents/MacOS"
+# The web client package has CipSoft's Linux layout: the engine in bin/ (as
+# bin/client), assets/ and sounds/ at the package root. The launcher starts
+# bin/tibia.js (/play's argv[0]), and the client finds Resources from there
+# (applicationDirPath/..), exactly as the Linux client does.
+WEB_CLIENT_BIN = "bin"
 
 # Tip packs ship inside the web packages as desktop has them: mods/<id>/ next to
 # the binary (merge-pack-into-tip.sh / pack-tibia-wasm.sh). lib/ and native/ are
@@ -347,27 +373,14 @@ def emit_cip(
 
     assets_dir = out / "launcher" / "assets-current"
     reuse_marker = out / ".idleot" / "reuse-assets"
-    if reuse_marker.is_file() and (assets_dir / "assets.json").is_file():
+    if reuse_marker.is_file() and (assets_dir / "assets-macos.json").is_file():
         # Host/previous tip already has packed assets — do not re-lzma.
         print(f"[assemble] CIP assets-current reused ({reuse_marker.read_text().strip() or 'unchanged'})")
-        assets_doc = load_json(assets_dir / "assets.json") or {"files": []}
-        if not (assets_dir / "assets-macos.json").is_file():
-            write_json(assets_dir / "assets-macos.json", assets_doc)
-        if not (assets_dir / "assets.json.sha256").is_file():
-            (assets_dir / "assets.json.sha256").write_text(
-                sha256_bytes((assets_dir / "assets.json").read_bytes())
-            )
+        records = (load_json(assets_dir / "assets-macos.json") or {}).get("files") or []
     else:
-        asset_files = records_from_list(out, assets_dir, things_rel)
-        assets_doc = {"files": asset_files}
-        write_json(assets_dir / "assets.json", assets_doc)
-        assets_bytes = (assets_dir / "assets.json").read_bytes()
-        (assets_dir / "assets.json.sha256").write_text(sha256_bytes(assets_bytes))
-        write_json(assets_dir / "assets-macos.json", assets_doc)
+        records = records_from_list(out, assets_dir, things_rel)
+    assets_doc = write_asset_lists(assets_dir, records)
 
-    # Dedicated minimap channel (Contents/Resources/minimap) — assets.json alone
-    # keeps tiles out of Contents/Resources/minimap, which installAssets does not remap.
-    emit_minimap_current(out, assets_doc if isinstance(assets_doc, dict) else {})
 
     # CIP shows 15.33.c9e45e under Play — not a long dated/branch stamp.
     version = cip_package_version(release.get("revision") or "0")
@@ -396,6 +409,11 @@ def emit_cip(
         else:
             plat = INSTALLER_PLATFORM[os_name]
             tree = out / "installers" / plat
+            if os_name == "macos" and tree.is_dir():
+                # CipSoft: the launcher package directory is the bundle itself
+                # (Contents/MacOS/Tibia), so pack from inside the .app.
+                bundles = sorted(tree.glob("*.app"))
+                tree = bundles[0] if len(bundles) == 1 else tree
             if tree.is_dir():
                 launcher_records.extend(pack_tree(out, launcher_dir, tree))
                 launcher_exe = LAUNCHER_EXECUTABLE[os_name]
@@ -467,21 +485,13 @@ def emit_cip(
             "assetsurl": f"{cdn_url}/launcher/assets-current/{assets_name}",
             "assetsversionurl": f"{cdn_url}/launcher/assets-current/assets.json.sha256",
         }
-        # Non-CIP channels (gated by tip launcher mods clientmods / minimap).
+        # Non-CIP channel (gated by tip launcher mods clientmods).
         if (out / "mods-current" / "mods.json").is_file():
             build["modsurl"] = f"{cdn_url}/launcher/mods-current/mods.json"
             build["modsversionurl"] = f"{cdn_url}/launcher/mods-current/mods.json.sha256"
         elif (out / "mods.json").is_file():
             build["modsurl"] = f"{cdn_url}/launcher/mods.json"
             build["modsversionurl"] = f"{cdn_url}/launcher/mods.json.sha256"
-        if (out / "minimap-current" / "minimap.json").is_file():
-            build["minimapurl"] = f"{cdn_url}/launcher/minimap-current/minimap.json"
-            build["minimapversionurl"] = (
-                f"{cdn_url}/launcher/minimap-current/minimap.json.sha256"
-            )
-        elif (out / "minimap.json").is_file():
-            build["minimapurl"] = f"{cdn_url}/launcher/minimap.json"
-            build["minimapversionurl"] = f"{cdn_url}/launcher/minimap.json.sha256"
         packages_builds.append(build)
 
     # IDLEOT_TIP_VARIANT selects which CipSoft variant this CDN tip advertises

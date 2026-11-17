@@ -161,7 +161,14 @@ push_blobs() {
         # Reuse marker = stamps only in the assemble tree; host already has the
         # packed sprites. Never --delete-replace from a stamp-only tree.
         if [[ -f "${site}/.idleot/reuse-assets" ]]; then
-          echo "[sync-cdn] assets-current unchanged — leave host tip alone"
+          # The lists are rewritten every assemble (cip_package.write_asset_lists:
+          # CipSoft paths per OS); the packed files they point at stay.
+          echo "[sync-cdn] assets-current files unchanged — update its lists only"
+          for list in assets.json assets-macos.json assets.json.sha256; do
+            [[ -f "${child}/${list}" ]] || continue
+            rsync -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+              "${child}/${list}" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/assets-current/${list}"
+          done
         else
           replace_tree "launcher/assets-current"
         fi
