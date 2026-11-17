@@ -295,6 +295,41 @@ def pack_tree(out: Path, package_dir: Path, tree: Path) -> list[dict]:
     return records
 
 
+# The web client package has the macOS bundle layout CipSoft's package has:
+# the engine in Contents/MacOS (as Contents/MacOS/client), assets in
+# Contents/Resources. /play runs the engine from there (argv[0]), so the
+# client's applicationDirPath() lookups (../Resources, mods/) work unchanged.
+WEB_CLIENT_BIN = "Contents/MacOS"
+
+# Tip packs ship inside the web packages as desktop has them: mods/<id>/ next to
+# the binary (merge-pack-into-tip.sh / pack-tibia-wasm.sh). lib/ and native/ are
+# linked into the wasm; the stamp / list files are packaging metadata.
+WASM_PACK_SKIP_DIRS = {"lib", "native"}
+WASM_PACK_SKIP_FILES = {".pack.stamp", ".files.manifest"}
+
+
+def wasm_pack_files(wasm_dir: Path, launcher_chrome_only: bool) -> list[tuple[Path, str]]:
+    """(blob, localfile) for mods/<id>/… next to the wasm binaries.
+
+    launcher_chrome_only: just what the launcher reads (brand.json, mod.json
+    for its launchersettings, images/launcher/); desktop shares one tip dir.
+    """
+    mods = wasm_dir / "mods"
+    if not mods.is_dir():
+        return []
+    files: list[tuple[Path, str]] = []
+    for path in sorted(p for p in mods.rglob("*") if p.is_file()):
+        parts = path.relative_to(mods).parts  # (<id>, …)
+        if len(parts) < 2 or parts[1] in WASM_PACK_SKIP_DIRS or path.name in WASM_PACK_SKIP_FILES:
+            continue
+        if launcher_chrome_only and not (
+            parts[1:] in (("brand.json",), ("mod.json",)) or parts[1:3] == ("images", "launcher")
+        ):
+            continue
+        files.append((path, path.relative_to(wasm_dir).as_posix()))
+    return files
+
+
 def emit_cip(
     out: Path,
     cdn_url: str,
@@ -354,6 +389,10 @@ def emit_cip(
                     rec = pack_file(out, launcher_dir, src, name)
                     if rec:
                         launcher_records.append(rec)
+                for src, localfile in wasm_pack_files(wasm_dir, launcher_chrome_only=True):
+                    rec = pack_file(out, launcher_dir, src, localfile)
+                    if rec:
+                        launcher_records.append(rec)
         else:
             plat = INSTALLER_PLATFORM[os_name]
             tree = out / "installers" / plat
@@ -403,11 +442,16 @@ def emit_cip(
                         if name == "tibia.data":
                             print(f"[assemble] warning: missing {src} — /play will 404 tibia.data")
                         continue
+                    # Plain copy: qtloader fetches tibia.data next to the tip.
                     copy_plain(src, client_dir / name)
-                    rec = pack_file(out, client_dir, src, name)
+                    rec = pack_file(out, client_dir, src, f"{WEB_CLIENT_BIN}/{name}")
                     if rec:
                         files.append(rec)
-            exe = "tibia.js"
+                for src, localfile in wasm_pack_files(wasm_dir, launcher_chrome_only=False):
+                    rec = pack_file(out, client_dir, src, f"{WEB_CLIENT_BIN}/{localfile}")
+                    if rec:
+                        files.append(rec)
+            exe = f"{WEB_CLIENT_BIN}/tibia.js"
         else:
             files.extend(records_from_list(out, client_dir, target.get("files")))
             files.extend(records_from_list(out, client_dir, target.get("content")))
