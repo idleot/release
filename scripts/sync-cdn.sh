@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rsync an assembled CDN delta onto the Coolify host volume.
 #   sync-cdn.sh blobs <site-dir>    # upload immutable trees (safe before gate)
-#   sync-cdn.sh flip <site-dir>     # replace latest/ + releases/ (after gate)
+#   sync-cdn.sh flip <site-dir>     # replace latest/ + releases/ (after gate), GC host store
 #   sync-cdn.sh push <site-dir>     # blobs + flip
 #   sync-cdn.sh verify              # host tree + docker volume mount healthy
 #   sync-cdn.sh rollback            # restore previous latest/ snapshot on host
@@ -24,6 +24,8 @@ set -euo pipefail
 CDN_SSH_USER="${CDN_SSH_USER:-root}"
 CDN_REMOTE_ROOT="${CDN_REMOTE_ROOT:-/data/idleot-cdn}"
 KEY_FILE="${RUNNER_TEMP:-/tmp}/cdn_ssh_key"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cmd="${1:-}"
 shift || true
@@ -237,6 +239,16 @@ prune_one launcher ${launcher_keep}
 EOF
 }
 
+# Drop host content/ blobs and packs/ zips no kept list references (assemble
+# prunes only its workspace; the host store is append-only otherwise). Runs
+# after the flip, so the new lists and the rollback snapshot are both on disk.
+# CDN_GC=0 skips; a refusal (broken flip) warns and keeps everything.
+gc_host_store() {
+  [[ "${CDN_GC:-1}" == "0" ]] && { echo "[sync-cdn] CDN_GC=0 — host store GC skipped"; return 0; }
+  remote "python3 - '${CDN_REMOTE_ROOT}' ${CDN_GC_GRACE_HOURS:-48}" <"${SCRIPT_DIR}/gc-cdn-host.py" \
+    || echo "::warning::host store GC refused — nothing deleted"
+}
+
 flip_manifests() {
   [[ -f "$site/latest/release.json" ]] || { echo "::error::missing $site/latest/release.json"; exit 1; }
 
@@ -253,9 +265,14 @@ EOF
 
   replace_tree latest
   # If assemble omitted things-* (manifests-only previous), pull host copies
-  # into the site tree so --delete does not wipe /play sprite lists.
+  # into the site tree so --delete does not wipe /play sprite lists. Same for
+  # the lists the outgoing release names (previous-latest/release.json): the
+  # rollback snapshot must keep resolving after the flip.
   if [[ -d "${site}/releases" ]]; then
-    remote "ls -d ${CDN_REMOTE_ROOT}/html/releases/things-* 2>/dev/null || true" | while read -r d; do
+    {
+      remote "ls -d ${CDN_REMOTE_ROOT}/html/releases/things-* 2>/dev/null || true"
+      remote "python3 - --outgoing-lists '${CDN_REMOTE_ROOT}'" <"${SCRIPT_DIR}/gc-cdn-host.py"
+    } | while read -r d; do
       [[ -n "$d" ]] || continue
       name="$(basename "$d")"
       if [[ ! -d "${site}/releases/${name}" ]]; then
@@ -275,6 +292,7 @@ EOF
   done
 
   prune_host_history
+  gc_host_store
   reload_nginx
 }
 
