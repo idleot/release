@@ -470,6 +470,31 @@ jobs:
           print("[pack] .pack.stamp", h.hexdigest()[:16])
           PY
 
+      # Function names for /play crash stacks (Safari gives only wasm-function[N]).
+      # Goes straight to the portal's symbol store, never into an artifact:
+      # this repo is public and the symbol map names the client's functions.
+      - name: Upload tibia.wasm symbol map
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.QTCAAC_SYMBOL_UPLOAD_TOKEN }}
+          SITE: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TOKEN" ]]; then
+            echo "::notice::QTCAAC_SYMBOL_UPLOAD_TOKEN not set — skip symbol upload"
+            exit 0
+          fi
+          sym="$(find _qtclient/build/tibia-wasm -name tibia.js.symbols | head -1)"
+          tip="$(find "$RUNNER_TEMP/linked-tip/client" -mindepth 2 -maxdepth 2 -type d -name wasm | head -1)"
+          [[ -n "$sym" && -n "$tip" ]] || { echo "::warning::no tibia.js.symbols or tip dir — skip"; exit 0; }
+          rev="$(basename "$(dirname "$tip")")"
+          code="$(curl -sS --retry 3 --max-time 300 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" \
+            -F "revision=$rev" -F "file=@$sym;filename=tibia.wasm.symbols" \
+            "$SITE/api/telemetry/symbols")"
+          echo "[symbols] tibia.wasm revision $rev → HTTP $code"
+          [[ "$code" == 201 ]] || echo "::warning::symbol upload returned HTTP $code"
+
       - name: Save vcpkg + ccache
         if: always()
         uses: ./.github/actions/cache-save
