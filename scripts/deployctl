@@ -89,6 +89,17 @@ else
   printf '%s=%s\n' $key_q $tag_q >> .env
 fi
 export $key_q=$tag_q
+# Free disk before the pull: drop this service's images no container uses.
+# The running image stays (it is the rollback target), so the host keeps at
+# most two per service; older tags re-pull from GHCR.
+repo=\$(docker compose config --images $svc_q 2>/dev/null | head -1 | sed -E 's/[:@][^/]*\$//')
+if [[ -n "\$repo" ]]; then
+  used=\$(docker ps -a --format '{{.Image}}' | xargs -r docker inspect --format '{{.Id}}' 2>/dev/null | sort -u)
+  docker images "\$repo" --format '{{.Repository}}:{{.Tag}} {{.ID}}' | while read -r ref id; do
+    full=\$(docker inspect --format '{{.Id}}' "\$id")
+    grep -qx "\$full" <<<"\$used" || docker rmi "\$ref" >/dev/null 2>&1 || true
+  done
+fi
 docker compose pull $svc_q
 # Same-tag re-promote must recreate: compose otherwise leaves a stuck
 # "Running" container (www 502) untouched.
@@ -102,6 +113,17 @@ EOF
     compose_ssh "bash -s" <<EOF
 set -euo pipefail
 cd $remote_q
+# Free disk before the pull: drop this service's images no container uses.
+# The running image stays (it is the rollback target), so the host keeps at
+# most two per service; older tags re-pull from GHCR.
+repo=\$(docker compose config --images $svc_q 2>/dev/null | head -1 | sed -E 's/[:@][^/]*\$//')
+if [[ -n "\$repo" ]]; then
+  used=\$(docker ps -a --format '{{.Image}}' | xargs -r docker inspect --format '{{.Id}}' 2>/dev/null | sort -u)
+  docker images "\$repo" --format '{{.Repository}}:{{.Tag}} {{.ID}}' | while read -r ref id; do
+    full=\$(docker inspect --format '{{.Id}}' "\$id")
+    grep -qx "\$full" <<<"\$used" || docker rmi "\$ref" >/dev/null 2>&1 || true
+  done
+fi
 docker compose pull $svc_q
 docker compose up -d --force-recreate --no-deps $svc_q
 if [[ $svc_q == server ]]; then
