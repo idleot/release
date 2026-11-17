@@ -160,7 +160,10 @@ tag → resolve → build missing images → assemble+emit_cip
 ```
 
 - **Desktop:** `tibia-desktop` + installers → `tibiaclient-{windows,macos,linux}-current`
-- **Browser:** `otclient-wasm` → `tibiaclient-web-current` + `launcher-web-current`
+- **Browser:** `otclient-wasm` → `tibiaclient-web-current` + `launcher-web-current`.
+  Both carry the tip pack as desktop does: the client package has the engine
+  and `mods/<id>/` in `Contents/MacOS` (CipSoft's bundle layout), the launcher
+  package has `mods/<id>/` brand (`brand.json`, `mod.json`, `images/launcher/`)
 - **Things:** shared `assets-current` + packs for all platforms
 - Portal `/play` and the desktop launcher both read `/launcher/tibiametadata.json` only
 
