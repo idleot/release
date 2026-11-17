@@ -166,7 +166,8 @@ push_blobs() {
           echo "[sync-cdn] assets-current files unchanged — update its lists only"
           for list in assets.json assets-macos.json assets.json.sha256; do
             [[ -f "${child}/${list}" ]] || continue
-            rsync -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+            # Readable by nginx whatever the CI umask was (setup_ssh sets 077).
+            rsync -a --chmod=F644 "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
               "${child}/${list}" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/assets-current/${list}"
           done
         else
