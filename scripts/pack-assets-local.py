@@ -31,7 +31,7 @@ def main() -> int:
         "--slice",
         type=Path,
         default=Path(os.environ.get("IDLEOT_ASSETS_SLICE", ROOT / "dist" / "slices" / "assets")),
-        help="cdn-assets slice (content/ + .idleot/v3/content-things.json)",
+        help="cdn-assets slice (content/ + .qtclient/v3/content-things.json)",
     )
     ap.add_argument(
         "--out",
@@ -66,7 +66,8 @@ def main() -> int:
         )
 
     slice_dir = args.slice.resolve()
-    things = slice_dir / ".idleot" / "v3" / "content-things.json"
+    meta = slice_dir / ".qtclient" if (slice_dir / ".qtclient").is_dir() else slice_dir / ".idleot"
+    things = meta / "v3" / "content-things.json"
     if not things.is_file():
         print(f"[pack-assets] missing {things} — run with --publish or make publish-assets ARGS=things", file=sys.stderr)
         return 1
@@ -96,7 +97,7 @@ def main() -> int:
         },
     }
     write_json(out / "latest" / "release.json", release)
-    assets_meta = load_json(slice_dir / ".idleot" / "assets.json") or {
+    assets_meta = load_json(meta / "assets.json") or {
         "assetsRevision": doc.get("revision", ""),
     }
     write_json(out / "latest" / "sources.json", {"assets": assets_meta, "history": {}})

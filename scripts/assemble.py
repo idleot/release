@@ -3,10 +3,10 @@
 
 Inputs (directories extracted from images; any may be missing):
   --previous  prior CDN tip (usually host latest/ + releases/ only; blobs stay on host)
-  --wasm      browser wasm slice    (client/<rev>/wasm/tibia.*, .idleot/wasm.json)
+  --wasm      browser wasm slice    (client/<rev>/wasm/tibia.*, .qtclient/wasm.json)
   --desktop   tibia-desktop slice (engine-<platform> + content-desktop lists)
-  --assets    cdn-assets slice      (assets/{store,outfits,items}/*, content-things list, .idleot/assets.json)
-  --launcher  launcher slice        (launcher/<version>/*, .idleot/launcher.json)
+  --assets    cdn-assets slice      (assets/{store,outfits,items}/*, content-things list, .qtclient/assets.json)
+  --launcher  launcher slice        (launcher/<version>/*, .qtclient/launcher.json)
 
 Output tree (every manifest URL is relative to the bundle root, except
 launcher/latest.json — the Tauri updater needs absolute URLs, see --cdn-url):
@@ -24,7 +24,8 @@ launcher/latest.json — the Tauri updater needs absolute URLs, see --cdn-url):
   assets/{store,outfits,items}/...
   healthz
 
-v3 lists come from <slice>/.idleot/v3/<name>.json with blobs in <slice>/content/
+v3 lists come from <slice>/.qtclient/v3/<name>.json (or .idleot/ for older
+slices) with blobs in <slice>/content/
 and packs in <slice>/packs/:
   content-desktop / content-web  -> targets.desktop / targets.web   {engine, content}
   engine-<platform>              -> targets.<platform>              {engine, files}
@@ -96,9 +97,16 @@ def pack(out: Path, digest: str) -> Path:
     return out / "packs" / digest[:2] / f"{digest}.zip"
 
 
+def slice_meta(src: Path) -> Path:
+    """A slice's metadata dir: `.qtclient/` (current qtclient publish tools),
+    else `.idleot/` (slices built before the rename)."""
+    current = src / ".qtclient"
+    return current if current.is_dir() else src / ".idleot"
+
+
 def import_v3(src: Path, out: Path, targets: dict) -> list[str]:
     """Copy a slice's v3 lists + blobs into the bundle and point targets at them; returns revisions."""
-    lists = sorted((src / ".idleot" / "v3").glob("*.json"))
+    lists = sorted((slice_meta(src) / "v3").glob("*.json"))
     if not lists:
         return []
     copy_tree(src / "content", out / "content")
@@ -126,7 +134,7 @@ def import_v3(src: Path, out: Path, targets: dict) -> list[str]:
 
 def import_things(src: Path, out: Path) -> str | None:
     """Copy the assets slice's sprites list + blobs + packs; returns its releases/ path."""
-    path = src / ".idleot" / "v3" / "content-things.json"
+    path = slice_meta(src) / "v3" / "content-things.json"
     doc = load_json(path)
     if doc is None:
         return None
@@ -296,8 +304,7 @@ def main() -> int:
     if wasm:
         copy_tree(wasm / "client", out / "client")
         sources["wasm"] = (
-            load_json(wasm / ".idleot" / "wasm.json")
-            or load_json(wasm / ".qtclient" / "wasm.json")
+            load_json(slice_meta(wasm) / "wasm.json")
             or sources["wasm"]
         )
         # Ensure a web target even when the wasm slice has no content-web v3 list
@@ -330,7 +337,7 @@ def main() -> int:
             shutil.rmtree(out / "images" / "store", ignore_errors=True)
             shutil.rmtree(out / "images" / "payment", ignore_errors=True)
             copy_tree(assets / "images", out / "images")
-        new_assets = load_json(assets / ".idleot" / "assets.json") or {}
+        new_assets = load_json(slice_meta(assets) / "assets.json") or {}
         sources["assets"] = new_assets or sources["assets"]
         prev_sources = (load_json(previous / "latest" / "sources.json") if previous else None) or {}
         prev_assets_rev = ((prev_sources.get("assets") or {}).get("assetsRevision") or "")
@@ -395,7 +402,7 @@ def main() -> int:
                 release["targets"][name].pop("things", None)
     if launcher_slice:
         copy_tree(launcher_slice / "launcher", out / "launcher")
-        sources["launcher"] = load_json(launcher_slice / ".idleot" / "launcher.json") or sources["launcher"]
+        sources["launcher"] = load_json(slice_meta(launcher_slice) / "launcher.json") or sources["launcher"]
 
     history = sources["history"]
     history["wasm"] = remember(history.get("wasm", []), (sources["wasm"] or {}).get("revision"), args.keep_wasm)
