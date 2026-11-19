@@ -474,7 +474,32 @@ def emit_cip(
             files.extend(records_from_list(out, client_dir, target.get("files")))
             files.extend(records_from_list(out, client_dir, target.get("content")))
             # CipSoft Play basename is `client` (packages/…/Contents/MacOS/client).
+            # The macOS package directory *is* the bundle (launcher appends .app to
+            # directoryname) — localfiles must be Contents/…, never IdleOT.app/….
             exe = executable_of(out, target.get("files"), "client")
+            if os_name == "macos":
+                if any(f.get("localfile") == "Contents/MacOS/client" for f in files):
+                    exe = "Contents/MacOS/client"
+                nested = [
+                    f.get("localfile")
+                    for f in files
+                    if str(f.get("localfile") or "").startswith(("IdleOT.app/", "Tibia.app/", "client.app/"))
+                ]
+                if nested:
+                    raise SystemExit(
+                        f"[assemble] macOS client package has nested .app localfiles "
+                        f"(e.g. {nested[0]}) — engine list must start at Contents/ "
+                        f"(packages/IdleOT.app is the bundle; see cip-package-layout.md)"
+                    )
+                if not exe.startswith("Contents/MacOS/"):
+                    raise SystemExit(
+                        f"[assemble] macOS client executable must be Contents/MacOS/… "
+                        f"(got {exe!r})"
+                    )
+                if not any(f.get("localfile") == exe for f in files):
+                    raise SystemExit(
+                        f"[assemble] macOS client executable {exe!r} missing from package files"
+                    )
         write_package(client_dir, version, exe, files, "second")
         assets_name = "assets-macos.json" if os_name == "macos" else "assets.json"
         build = {

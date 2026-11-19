@@ -175,25 +175,30 @@ push_blobs() {
         fi
       elif [[ -d "$child" && "$name" == *-current ]]; then
         # Never overwrite a live tip with an empty stub.
-        # WASM tips need tibia.js / launcher.js / *.wasm. Tile tips (minimap-current)
-        # ship minimap.json (+ tiles) without wasm — do not treat those as empty.
-        if [[ -f "${child}/minimap.json" ]] \
+        # - Web: tibia.js / launcher.js / *.wasm
+        # - Minimap channel: minimap.json (+ tiles)
+        # - Desktop CIP tips (tibiaclient-*-current, launcher-*-current): package.json
+        #   (+ lzma payloads). Without package.json, sync used to skip forever and
+        #   leave the Oct IdleOT.app/… client tip stuck on the host.
+        if [[ -f "${child}/package.json" ]] \
+          || [[ -f "${child}/minimap.json" ]] \
           || compgen -G "${child}/*.wasm" >/dev/null \
           || compgen -G "${child}/tibia.js" >/dev/null \
           || compgen -G "${child}/launcher.js" >/dev/null; then
           replace_tree "launcher/${name}"
         else
-          echo "[sync-cdn] skip empty tip launcher/${name} (no wasm/js/minimap) — leave host alone"
+          echo "[sync-cdn] skip empty tip launcher/${name} (no package.json/wasm/js/minimap) — leave host alone"
         fi
       elif [[ -d "$child" ]]; then
         remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher/${name}'"
         rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
           "${child}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/${name}/"
       else
-        # Tip manifests (tibiametadata.json, hints.json, …) must overwrite —
-        # --ignore-existing left CipSoft directoryname stuck on the prior tip.
+        # Tip manifests + /download archives must overwrite — --ignore-existing
+        # left CipSoft directoryname and IdleOT-*.dmg stuck on the prior tip
+        # while latest/desktop.json already advertised a new hash.
         case "$name" in
-          tibiametadata.json|hints.json|*.json.version)
+          tibiametadata.json|hints.json|*.json.version|IdleOT-*.dmg|IdleOT-*.zip|IdleOT-*.appimage|IdleOT-*.exe)
             rsync -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
               "$child" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/"
             ;;
