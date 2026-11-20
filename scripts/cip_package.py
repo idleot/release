@@ -178,11 +178,16 @@ def records_from_list(out: Path, package_dir: Path, list_rel: str | None) -> lis
     return records
 
 
-def cip_package_version(fallback: str = "0") -> str:
+def cip_package_version(fallback: str = "0", prefer_fallback: bool = False) -> str:
     """CIP Play-button stamp: `<cip_version>.<6 hex>` (e.g. 15.33.c9e45e).
 
     Content-store revisions stay dated elsewhere; only the launcher-facing
     package.json.version uses this short form so it fits CIP's package chrome.
+
+    The launcher reinstalls a package only when this string changes. With
+    `prefer_fallback` (client packages) a local build stamps the tip revision —
+    a content hash that changes on pack-only rebuilds — instead of qtclient's
+    git HEAD, which would leave browsers running a stale tibia.wasm.
     """
     cip = "15.33"
     version_json = OTC / "cip" / "VERSION.json"
@@ -192,6 +197,8 @@ def cip_package_version(fallback: str = "0") -> str:
         except (OSError, ValueError):
             pass
     sha = os.environ.get("SOURCE_COMMIT", "").strip()
+    if not sha and prefer_fallback and fallback and fallback != "0":
+        sha = fallback.rsplit("-", 1)[-1]
     if not sha:
         try:
             sha = subprocess.run(
@@ -383,7 +390,7 @@ def emit_cip(
 
 
     # CIP shows 15.33.c9e45e under Play — not a long dated/branch stamp.
-    version = cip_package_version(release.get("revision") or "0")
+    version = cip_package_version(release.get("revision") or "0", prefer_fallback=True)
     launcher_version = cip_package_version(launcher_version)
     launcher_builds = []
     packages_builds = []
@@ -589,28 +596,43 @@ def emit_cip(
             if not target.exists() or target.stat().st_size != path.stat().st_size:
                 shutil.copy2(path, target)
         break
-    # /play CSS backdrop + CIP launcher chrome (IdleOT replacements).
+    # /play + login splash + launcher chrome at tip /images/launcher/.
+    # Prefer product pack art (IdleOT), then release-vendored tips, then CIP carve.
+    # Unchanged tip keeps CIP BackgroundImage so stock qtclient stays Tibia-looking.
+    # parents[2] = apps/ in the umbrella checkout; release CI sets IDLEOT_CLIENT_LAUNCHER_IMAGES.
+    apps_root = Path(__file__).resolve().parents[2]
+    env_chrome = os.environ.get("IDLEOT_CLIENT_LAUNCHER_IMAGES", "").strip()
     launcher_img_roots = (
+        Path(env_chrome) if env_chrome else None,
+        apps_root / "idleot-client" / "launcher" / "images" / "launcher",
         release_root / "vendor" / "launcher-hints" / "images" / "launcher",
-        Path(__file__).resolve().parents[2]
-        / "otclient"
-        / "src"
-        / "tibia"
-        / "launcher"
-        / "images"
-        / "launcher",
+        apps_root / "qtclient" / "launcher" / "upstream" / "images" / "launcher",
+        apps_root / "otclient" / "src" / "tibia" / "launcher" / "images" / "launcher",
     )
-    for chrome in launcher_img_roots:
-        if not chrome.is_dir():
-            continue
-        for path in chrome.iterdir():
+    def _copy_launcher_chrome(src: Path) -> int:
+        n = 0
+        if not src.is_dir():
+            return n
+        for path in src.iterdir():
             if not path.is_file() or path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
                 continue
             target = out / "images" / "launcher" / path.name
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists() or target.stat().st_size != path.stat().st_size:
                 shutil.copy2(path, target)
-        break
+            n += 1
+        return n
+
+    for chrome in launcher_img_roots:
+        if chrome is None:
+            continue
+        if _copy_launcher_chrome(chrome):
+            print(f"[assemble] tip images/launcher ← {chrome}")
+            break
+    # Overlay pack tip chrome (branded wasm/desktop already merged mods/<id>/images/launcher).
+    for pack_chrome in sorted(out.glob("**/mods/*/images/launcher")):
+        if _copy_launcher_chrome(pack_chrome):
+            print(f"[assemble] tip images/launcher ← pack {pack_chrome}")
 
     # /download reads latest/desktop.json — ship real launcher archives, not CIP metadata.
     # macOS must be a DMG (or ditto zip) so Qt framework symlinks survive; Python
