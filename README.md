@@ -150,7 +150,8 @@ under `content/<aa>/<sha>`. Version stamps: `package.json.version` and
 `assets.json.sha256`. Tip channel: set `IDLEOT_TIP_VARIANT` when assembling
 (`regular` / `test` / `beta`); launcher clients set `IDLEOT_VARIANT` (+ optional
 `IDLEOT_CDN_URL` for remote-dev) to install into the matching
-`packages/<directoryname>/`. Local play uses `make client-start` (no tip).
+`packages/<directoryname>/`. Local play uses `make qtclient desktop run` (launcher + tip;
+`DIRECT=1 make qtclient desktop run` remains the direct-binary debug hatch).
 
 Release path for binaries:
 

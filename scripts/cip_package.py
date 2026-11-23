@@ -36,7 +36,8 @@ OTC = _ROOT / "qtclient" if (_ROOT / "qtclient").is_dir() else _ROOT / "otclient
 # Tip packages[].directoryname → packages/<name>/ on disk (also used as name).
 # CipSoft: "Tibia" — packages/Tibia on Linux/Windows, packages/Tibia.app on macOS
 # (the launcher adds .app there). See docs/reverse-engineering/cip-package-layout.md.
-# CipSoft tip variants: regular | preview | test | beta (no "local" — local skips launcher).
+# CipSoft tip variants: regular | preview | test | beta.
+# Local launcher-first play emits its own tip (apps/qtclient emit_play_tip.py).
 CLIENT_PACKAGE_DIR = "IdleOT"
 CLIENT_VARIANTS = {
     "regular": "IdleOT",

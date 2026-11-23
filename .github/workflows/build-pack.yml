@@ -89,6 +89,7 @@ jobs:
           sparse-checkout: |
             .github/actions
             scripts/stamp-mod-urls.py
+            scripts/upload-desktop-symbols.py
           sparse-checkout-cone-mode: false
 
       - name: Checkout idleot-client pack sources
@@ -262,6 +263,50 @@ jobs:
           else
             echo "::warning::IdleOT STATIC .a not found under build/*/mods/idleot/lib" >&2
           fi
+
+      # Breakpad symbols for desktop crash reports (client, launcher, bundled Qt).
+      # Straight to the portal's symbol store, never into an artifact or the log:
+      # this repo is public. Only modules the store lacks are uploaded.
+      - name: Upload desktop crash symbols
+        continue-on-error: true
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.QTCAAC_SYMBOL_UPLOAD_TOKEN }}
+          SITE: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
+          DUMP_SYMS_VERSION: v2.3.9
+        run: |
+          set -euo pipefail
+          if [[ -z "$TOKEN" ]]; then
+            echo "::notice::QTCAAC_SYMBOL_UPLOAD_TOKEN not set — skip desktop symbols"
+            exit 0
+          fi
+          case "${{ matrix.plat }}" in
+            macos-arm64) asset=dump_syms-aarch64-apple-darwin.tar.xz
+              sha=4945b7e5de0d7ad403822635f0fb912b69990fc412741ff2b7b512e168c40a32 ;;
+            linux-x64) asset=dump_syms-x86_64-unknown-linux-gnu.tar.xz
+              sha=0fc852a86b00337407d9d423cc388a24c3b489ccaaedcf92623cad57af5ca8ad ;;
+            windows-x64) asset=dump_syms-x86_64-pc-windows-msvc.zip
+              sha=bdf48486220708808a3e00aec78856ee1cce096189d47a1e2cb1c635f93bacc7 ;;
+            *) echo "::warning::no dump_syms for ${{ matrix.plat }}"; exit 0 ;;
+          esac
+          dir="$RUNNER_TEMP/dump_syms"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/$asset" \
+            "https://github.com/mozilla/dump_syms/releases/download/$DUMP_SYMS_VERSION/$asset"
+          python3 -c 'import hashlib,sys; got=hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(); sys.exit(0 if got==sys.argv[2] else "dump_syms sha256 mismatch")' \
+            "$dir/$asset" "$sha"
+          case "$asset" in
+            *.zip) (cd "$dir" && unzip -q -o "$asset") ;;
+            *) tar -xJf "$dir/$asset" -C "$dir" ;;
+          esac
+          bin="$(find "$dir" -type f \( -name dump_syms -o -name dump_syms.exe \) | head -1)"
+          chmod +x "$bin"
+          # Windows: the client's and launcher's PDBs stay in the build tree.
+          pdbs=()
+          while IFS= read -r pdb; do pdbs+=("$pdb"); done \
+            < <(find _qtclient/build -path '*/bin/*' -name '*.pdb' 2>/dev/null)
+          python3 scripts/upload-desktop-symbols.py "$bin" "$RUNNER_TEMP/pack/linked-tip" \
+            ${pdbs[@]+"${pdbs[@]}"}
 
       - name: Save vcpkg + ccache
         if: always()
