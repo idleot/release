@@ -518,7 +518,7 @@ def emit_cip(
             "assetsurl": f"{cdn_url}/launcher/assets-current/{assets_name}",
             "assetsversionurl": f"{cdn_url}/launcher/assets-current/assets.json.sha256",
         }
-        # Non-CIP channel (gated by tip launcher mods clientmods).
+        # Non-CIP channel "mods" (enabled by the pack's launcher.json "channels").
         if (out / "mods-current" / "mods.json").is_file():
             build["modsurl"] = f"{cdn_url}/launcher/mods-current/mods.json"
             build["modsversionurl"] = f"{cdn_url}/launcher/mods-current/mods.json.sha256"
