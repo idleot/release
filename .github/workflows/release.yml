@@ -415,12 +415,12 @@ jobs:
       - name: Wait for the game server
         run: |
           for _ in $(seq 1 30); do
-            if timeout 5 bash -c "exec 3<>/dev/tcp/${GAME_HOST}/7172" 2>/dev/null; then
+            if timeout 5 bash -c "exec 3<>/dev/tcp/${GAME_HOST}/7171" 2>/dev/null; then
               echo "game port open"; exit 0
             fi
             sleep 10
           done
-          echo "::error::game server did not come back on :7172"; exit 1
+          echo "::error::game server did not come back on :7171"; exit 1
 
   deploy-portal:
     name: Deploy portal

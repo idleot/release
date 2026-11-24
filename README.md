@@ -75,7 +75,7 @@ jobs; Release never assumes qtclient main already published the pin.
 
 This repo is public; the engines are not.
 
-- Product client is **tibia** (compiled QML + gamecore). Desktop slice is
+- Product client is **tibia** (qtclient, compiled QML). Desktop slice is
   `tibia-desktop`; WASM slice is tibia artifacts under `otclient-wasm`.
 - Compiler output goes to files; logs show only an error summary.
 - Opaque caches only: pinned Qt SDK/emsdk and **ccache** object stores (no
@@ -102,8 +102,8 @@ healthz
 
 | Slice | Image | Built by |
 |-------|-------|----------|
-| WASM | `ghcr.io/idleot/otclient-wasm:<pack>-host-<soft>` (+ qtclient SHA alias) | `build-client.yml` (ensure qtclient host + pack, assemble tip) |
-| Desktop store | `ghcr.io/idleot/tibia-desktop:<pack>-host-<soft>` (+ qtclient SHA alias) | same |
+| WASM | `ghcr.io/idleot/otclient-wasm:<pack>-host-<qtclient-sha>` (+ qtclient SHA alias) | `build-client.yml` (ensure qtclient host + pack, assemble tip) |
+| Desktop store | `ghcr.io/idleot/tibia-desktop:<pack>-host-<qtclient-sha>` (+ qtclient SHA alias) | same |
 | Thin CDN runtime | `ghcr.io/idleot/cdn:runtime-<hash>` | `bundle.yml` (nginx config only) |
 | Assets | `ghcr.io/idleot/cdn-assets` | `publish-assets --push` |
 
@@ -134,7 +134,7 @@ as `IDLEOT_CDN_URL`. Tip `tibiametadata.json` absolute URLs also use static.
 ## Binary pack / update contract (CIP)
 
 Desktop and browser share one tip protocol (see
-[`docs/reverse-engineering/tibia-launcher-packaging.md`](../../docs/reverse-engineering/tibia-launcher-packaging.md)):
+[`docs/reverse-engineering/cip-package-layout.md`](../../docs/reverse-engineering/cip-package-layout.md)):
 
 | Layer | CDN path | Installer |
 |-------|----------|-----------|
