@@ -65,6 +65,9 @@ jobs:
     needs: [meta]
     if: inputs.build_desktop
     runs-on: ${{ matrix.runner }}
+    # macos kit can lag (cancelled kit job → missing ghcr tag). Do not block
+    # wasm/linux/windows assemble + CDN tip flip on that leg alone.
+    continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
       matrix:
@@ -74,16 +77,19 @@ jobs:
             kit: linux-x64
             triplet: x64-linux-static
             os_slug: linux
+            optional: false
           - plat: macos-arm64
             runner: macos-15
             kit: macos-arm64
             triplet: arm64-osx-static
             os_slug: macos
+            optional: true
           - plat: windows-x64
             runner: windows-2022
             kit: windows-x64
             triplet: x64-windows-static-md
             os_slug: windows
+            optional: false
     environment: release
     env:
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
