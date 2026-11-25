@@ -285,6 +285,45 @@ def write_asset_lists(assets_dir: Path, records: list[dict]) -> dict:
         write_json(assets_dir / name, docs[name])
     # One version for both lists (the launcher compares assets.json.sha256).
     (assets_dir / "assets.json.sha256").write_text(sha256_bytes((assets_dir / "assets.json").read_bytes()))
+    # Validate catalog completeness against the packed tip (reuse-assets included).
+    catalog_lzma = None
+    for rec in records:
+        local = str(rec.get("localfile") or "")
+        if local.endswith("catalog-content.json"):
+            # Packed lzma lives at assets-current/<url> when emit_cip just wrote it.
+            url = str(rec.get("url") or "")
+            for cand in (assets_dir / url, assets_dir / f"{local}.lzma"):
+                if cand.is_file():
+                    catalog_lzma = cand
+                    break
+            ph = str(rec.get("packedhash") or "")
+            if catalog_lzma is None and ph:
+                # content-addressed store next to launcher/ (assemble out/)
+                for parent in (assets_dir.parent.parent, assets_dir.parent.parent.parent):
+                    cand = parent / "content" / ph[:2] / ph
+                    if cand.is_file():
+                        catalog_lzma = cand
+                        break
+            break
+    if catalog_lzma is not None:
+        try:
+            catalog = json.loads(lzma.decompress(catalog_lzma.read_bytes(), format=lzma.FORMAT_ALONE))
+        except (OSError, lzma.LZMAError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"[assemble] cannot read catalog-content.json for tip check: {exc}") from exc
+        locals_set = {str(r.get("localfile") or "") for r in docs["assets.json"]["files"]}
+        missing = []
+        for entry in catalog:
+            name = str(entry.get("file") or "")
+            if not name:
+                continue
+            if not any(local.endswith(f"/{name}") or local.endswith(name) for local in locals_set):
+                missing.append(name)
+        if missing:
+            raise SystemExit(
+                "[assemble] catalog-content.json references files missing from assets.json: "
+                + ", ".join(missing[:5])
+                + (f" (+{len(missing) - 5})" if len(missing) > 5 else "")
+            )
     return docs["assets-macos.json"]
 
 
