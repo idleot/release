@@ -1,7 +1,8 @@
 ---
-# Assemble release client slices from qtclient+IdleOT linked tips built in build-pack.
+# Assemble release client slices from the qtclient tips built with the IdleOT pack in build-pack.
 # Pack builds need client-sdk only (ensure-qtclient-host). Desktop + wasm tips are the
-# linked-tip artifacts (STATIC IdleOT — no stock-ORAS merge fallback).
+# tip artifacts (desktop: mods/idleot/native/mod.* MODULE; wasm: static-ABI pack inside
+# tibia.wasm — no stock-ORAS merge fallback).
 #
 # Tip images: tibia-wasm / tibia-desktop tagged by qtclient+pack
 #   (${idleot_client_sha}-host-${qtclient_sha}) and aliased to :${qtclient_sha}.
@@ -217,12 +218,9 @@ jobs:
             echo "::error::linked tip mods/idleot/mod.json missing" >&2
             exit 1
           }
-          if [[ -d "$tip/mods/idleot/native" ]]; then
-            echo "::error::native/ must not ship on linked tip" >&2
-            exit 1
-          fi
+          # wasm: the pack is static-ABI inside tibia.wasm — no native/.
           bash _qtclient/scripts/lifecycle/lib/check-tip-pack-presence.sh \
-            --tip "$tip" --id idleot --allow-urls-only
+            --tip "$tip" --id idleot --no-native
           mkdir -p "$RUNNER_TEMP/slice/.idleot"
           if [[ -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" ]]; then
             cp -f "$RUNNER_TEMP/slice/.qtclient/wasm.json" "$RUNNER_TEMP/slice/.idleot/wasm.json"
@@ -357,18 +355,18 @@ jobs:
           mkdir -p _qtclient/client/mods _qtclient/launcher/mods
           cp -a _idleot-client/client _qtclient/client/mods/idleot
           cp -a _idleot-client/launcher _qtclient/launcher/mods/idleot
-          # Prefer qtclient tip built with QTCLIENT_LINKED_PACK (pack artifact linked-tip).
+          # The qtclient tip built with QTCLIENT_PACKS (pack artifact pack-linked-tip-*).
           if [[ -d "$RUNNER_TEMP/pack/linked-tip" ]]; then
             cp -a "$RUNNER_TEMP/pack/linked-tip/." "$RUNNER_TEMP/client/"
             tip="$RUNNER_TEMP/client/engine"
             [[ -d "$tip" ]] || tip="$RUNNER_TEMP/client"
             echo "[assemble] using linked qtclient tip from pack artifact"
           else
-            echo "::error::linked-tip missing for ${{ matrix.platform }} — desktop must ship IdleOT C++ from the pack build" >&2
+            echo "::error::linked-tip missing for ${{ matrix.platform }} — desktop must ship the IdleOT MODULE from the pack build" >&2
             find "$RUNNER_TEMP/pack" -maxdepth 3 -type d 2>/dev/null | head -40 >&2 || true
             exit 1
           fi
-          # Ensure FS chrome + brand on tip (linked tip already has mods/idleot).
+          # Ensure the pack + brand on tip (the tip artifact already has mods/idleot).
           if [[ ! -f "$tip/mods/idleot/mod.json" ]] && \
              [[ -z "$(find "$tip" -path '*/Contents/MacOS/mods/idleot/mod.json' 2>/dev/null | head -1)" ]]; then
             bash _qtclient/scripts/lifecycle/lib/merge-pack-into-tip.sh \
@@ -408,6 +406,9 @@ jobs:
               exit 1
             }
           fi
+          # Desktop ships the pack MODULE (host API v9).
+          bash _qtclient/scripts/lifecycle/lib/check-tip-pack-presence.sh \
+            --tip "$(dirname "$(dirname "$pack_tip")")" --id idleot --native
           echo "ENGINE_TIP=$tip" >> "$GITHUB_ENV"
 
       - name: Install Linux packaging deps
@@ -456,6 +457,9 @@ jobs:
             app="$dest"
           fi
           xattr -cr "$app" || true
+          while IFS= read -r mod; do
+            codesign --force --sign - "$mod" || true
+          done < <(find "$app/Contents/MacOS/mods" -path '*/native/mod.dylib' 2>/dev/null)
           codesign --force --deep --sign - "$app" || true
           echo "ENGINE_APP=$app" >> "$GITHUB_ENV"
 
@@ -477,9 +481,16 @@ jobs:
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm -f "$RUNNER_TEMP/cert.p12"
           xattr -cr "$ENGINE_APP"
+          # Inside-out: pack MODULEs (Contents/MacOS/mods/<id>/native/mod.dylib) are not
+          # reached by --deep; notarization rejects an unsigned/ad-hoc mod.dylib.
+          while IFS= read -r mod; do
+            codesign --force --options runtime --timestamp \
+              --sign "$MACOS_SIGN_IDENTITY" "$mod"
+          done < <(find "$ENGINE_APP/Contents/MacOS/mods" -path '*/native/mod.dylib' 2>/dev/null)
           codesign --force --deep --options runtime --timestamp \
             --entitlements "$GITHUB_WORKSPACE/_qtclient/tools/publish/installer/hardened-runtime.entitlements" \
             --sign "$MACOS_SIGN_IDENTITY" "$ENGINE_APP"
+          codesign --verify --deep --strict "$ENGINE_APP"
 
       - name: Notarize engine bundle
         if: runner.os == 'macOS' && env.MACOS_SIGNING == 'true'
@@ -505,6 +516,24 @@ jobs:
           certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
           files-folder: ${{ env.ENGINE_TIP }}
           files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Pack MODULE (mods/<id>/native/mod.dll) is loaded into the signed client.
+      - name: Sign pack MODULE
+        if: runner.os == 'Windows' && env.WINDOWS_SIGNING == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
+          files-folder: ${{ env.ENGINE_TIP }}/mods
+          files-folder-filter: dll
+          files-folder-recurse: true
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256

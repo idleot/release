@@ -1,9 +1,15 @@
 ---
-# Build qtclient+IdleOT linked tips on **public** runners (free minutes).
-# Pack C++ STATIC-links into qtclient (QTCLIENT_LINKED_PACK); FS chrome stages under
-# mods/idleot/. Also stages pack-archive-idleot-* (.a + FS) for QTCLIENT_LINKED_PACK_LIBS.
-# No native/SIDE_MODULE. Private idleot-client is checked out with RELEASE_TOKEN;
-# qtclient tree provides cmake/Qt/emsdk.
+# Build qtclient tips with the IdleOT pack on **public** runners (free minutes).
+# Host and pack builds are decoupled (host API v9):
+#   1. qtclient pack SDK (QtClientSdk: abi headers + cmake config; configure-only)
+#   2. the pack against that SDK alone (idleot-client scripts/lifecycle/build/pack.sh)
+#        desktop: runtime MODULE  → mods/idleot/native/mod.{dylib,so,dll}
+#        wasm:    static-ABI .a   → exported QtClientPack::idleot
+#   3. the qtclient tip with -DQTCLIENT_PACKS=<pack install prefix>
+#        desktop: stages mods/idleot (native/ must ship); wasm: links the archive into
+#        tibia.wasm (native/ must not ship).
+# Private idleot-client is checked out with RELEASE_TOKEN; the qtclient tree provides
+# cmake/Qt/emsdk and the SDK sources.
 #
 # Compile/dep cache: same qtclient contract via vendored
 # .github/actions/cache-{restore,save} (workspace/.cache/{vcpkg,ccache} + qtclient GHCR
@@ -166,7 +172,7 @@ jobs:
           QT_PULL_WAIT_SECS: '7200'
         run: bash tools/qt/ci-setup.sh --pull-only --with-vcpkg --with-deps
 
-      - name: Build qtclient linked tip (STATIC IdleOT)
+      - name: Build qtclient tip with the IdleOT pack (SDK → pack MODULE → tip)
         shell: bash
         working-directory: _qtclient
         env:
@@ -175,7 +181,6 @@ jobs:
           VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
           STOCK_HOST: '0'
           QTCLIENT_ENABLE_MODS: 'ON'
-          QTCLIENT_LINKED_PACK: ${{ github.workspace }}/idleot-client/client
           TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
@@ -192,12 +197,25 @@ jobs:
           fi
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
           export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
-          bash scripts/lifecycle/build/desktop.sh
-          # Launcher installer needs bin/launcher next to the client in the linked tip.
+          # 1. pack SDK (QtClientSdk) for this qtclient commit + kit — compiles nothing.
+          sdk="$RUNNER_TEMP/qtclient-sdk/desktop"
+          QTCLIENT_SDK_DIR="$sdk" bash scripts/lifecycle/build/sdk.sh
+          # 2. the pack against the SDK alone — the gate IS the pack build (static
+          #    contract, no host paths in the build graph, zero tip imports).
+          prefix="$RUNNER_TEMP/pack-install/desktop"
+          bash scripts/ci/check-pack-sdk-build.sh --pack "$GITHUB_WORKSPACE/idleot-client" \
+            --sdk "$sdk" --prefix "$prefix" --build-dir "$RUNNER_TEMP/pack-build/desktop"
+          ls "$prefix/mods/idleot/native/"mod.* >/dev/null 2>&1 || {
+            echo "::error::pack MODULE missing: $prefix/mods/idleot/native/mod.*" >&2
+            exit 1
+          }
+          # 3. the tip, taking the installed pack as an input.
+          QTCLIENT_PACKS="$prefix" bash scripts/lifecycle/build/desktop.sh
+          # Launcher installer needs bin/launcher next to the client in the tip.
           bash scripts/lifecycle/build/desktop.sh --launcher
           bin="$(bash scripts/lifecycle/lib/find-client-bin.sh . 2>/dev/null || true)"
           [[ -n "$bin" && -e "$bin" ]] || {
-            echo "::error::linked tip client binary missing after qtclient desktop build" >&2
+            echo "::error::tip client binary missing after qtclient desktop build" >&2
             exit 1
           }
           tip="$(dirname "$bin")"
@@ -211,15 +229,14 @@ jobs:
             pack="$(find "$tip" -path '*/mods/idleot/mod.json' 2>/dev/null | head -1 | xargs dirname || true)"
           fi
           [[ -n "${pack:-}" && -f "$pack/mod.json" ]] || {
-            echo "::error::linked tip mods/idleot/mod.json missing" >&2
+            echo "::error::tip mods/idleot/mod.json missing (QTCLIENT_PACKS stage)" >&2
             find "$tip" -path '*/mods/*' 2>/dev/null | head -40 || true
             exit 1
           }
-          if [[ -d "$pack/native" ]]; then
-            echo "::error::native/ must not ship on linked tip" >&2
-            exit 1
-          fi
-          # Stamp tip pack URLs before packaging so linked-tip ships production bases
+          # Desktop ships the pack MODULE (host API v9).
+          bash scripts/lifecycle/lib/check-tip-pack-presence.sh \
+            --tip "$(dirname "$(dirname "$pack")")" --id idleot --native
+          # Stamp tip pack URLs before packaging so the tip artifact ships production bases
           # (urls.* + launchersettings.URLS.systemSurvey).
           python3 "$GITHUB_WORKSPACE/scripts/stamp-mod-urls.py" "$pack/mod.json" \
             --site "$TIBIA_SITE_URL" --asset "$TIBIA_ASSET_BASE" --payments "$QTCLIENT_PAYMENTS_URL"
@@ -232,7 +249,7 @@ jobs:
           # Artifact keeps FS chrome for assemble brand/stamp; tip binary tree is
           # published via qtclient desktop package below when present.
           cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
-          # Also stage tip root marker so assemble can prefer linked qtclient tip.
+          # Also stage tip root marker so assemble can find the qtclient tip.
           mkdir -p "$RUNNER_TEMP/pack/linked-tip-meta"
           echo "$tip" >"$RUNNER_TEMP/pack/linked-tip-meta/tip-dir.txt"
           # Package qtclient desktop tip (engine + mods + launcher) for assemble.
@@ -240,28 +257,13 @@ jobs:
             QTCLIENT_PLATFORM="${{ matrix.plat }}" \
             PLATFORM="${{ matrix.plat }}" \
             bash scripts/lifecycle/package/desktop.sh
-          # Fail early if launcher did not land in the linked tip (assemble needs it).
+          # Fail early if launcher did not land in the tip (assemble needs it).
           if [[ ! -e "$RUNNER_TEMP/pack/linked-tip/bin/launcher" \
              && ! -e "$RUNNER_TEMP/pack/linked-tip/bin/launcher.exe" \
              && ! -d "$RUNNER_TEMP/pack/linked-tip/bin/launcher.app" ]]; then
-            echo "::error::linked tip missing bin/launcher after package/desktop.sh" >&2
+            echo "::error::tip missing bin/launcher after package/desktop.sh" >&2
             ls -la "$RUNNER_TEMP/pack/linked-tip/bin" 2>/dev/null || true
             exit 1
-          fi
-          # Phase 3: pack archive (.a + FS) for QTCLIENT_LINKED_PACK_LIBS tip link.
-          build_dir=""
-          while IFS= read -r libdir; do
-            [[ -z "$libdir" ]] && continue
-            build_dir="$(cd "$libdir/../../.." && pwd)"
-            break
-          done < <(find build -type d -path '*/mods/idleot/lib' 2>/dev/null | head -5)
-          if [[ -n "$build_dir" ]]; then
-            bash scripts/lifecycle/package/archive-mod.sh \
-              --id idleot --build-dir "$build_dir" \
-              --out "$RUNNER_TEMP/pack/archive-idleot" \
-              || echo "::warning::archive-mod.sh failed (non-fatal this run)" >&2
-          else
-            echo "::warning::IdleOT STATIC .a not found under build/*/mods/idleot/lib" >&2
           fi
 
       # Breakpad symbols for desktop crash reports (client, launcher, bundled Qt).
@@ -330,7 +332,7 @@ jobs:
           retention-days: 2
           include-hidden-files: true
 
-      - name: Upload linked tip (engine + mods)
+      - name: Upload tip (engine + mods incl. native/mod.*)
         uses: actions/upload-artifact@v4
         with:
           name: pack-linked-tip-${{ matrix.plat }}
@@ -338,16 +340,6 @@ jobs:
           retention-days: 2
           include-hidden-files: true
 
-      - name: Upload pack archive artifact
-        if: success()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: pack-archive-idleot-${{ matrix.plat }}
-          path: ${{ runner.temp }}/pack/archive-idleot
-          retention-days: 2
-          include-hidden-files: true
-          if-no-files-found: ignore
 
       - name: Login GHCR (oras) for idleot push
         shell: bash
@@ -444,7 +436,7 @@ jobs:
           QT_PULL_WAIT_SECS: '7200'
         run: bash tools/qt/ci-setup.sh --wasm --pull-only --with-vcpkg --with-deps
 
-      - name: Build qtclient linked tip (STATIC IdleOT)
+      - name: Build qtclient wasm tip with the IdleOT pack (wasm SDK → static-ABI pack → tip)
         working-directory: _qtclient
         env:
           QT_ROOT: ${{ runner.temp }}/Qt
@@ -452,7 +444,6 @@ jobs:
           VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
           STOCK_HOST: '0'
           QTCLIENT_ENABLE_MODS: 'ON'
-          QTCLIENT_LINKED_PACK: ${{ github.workspace }}/idleot-client/client
           TIBIA_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           IDLEOT_SITE_URL: ${{ vars.IDLEOT_SITE_URL || 'https://www.idleot.com' }}
           TIBIA_ASSET_BASE: ${{ vars.IDLEOT_ASSET_BASE || 'https://static.idleot.com' }}
@@ -463,7 +454,18 @@ jobs:
           mkdir -p "$CCACHE_DIR"
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
           export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
-          bash scripts/lifecycle/build/wasm.sh
+          # 1. wasm pack SDK; 2. the pack's static-ABI archive against it alone;
+          # 3. the tip links that installed archive (QtClientPack::idleot).
+          sdk="$RUNNER_TEMP/qtclient-sdk/wasm"
+          QTCLIENT_SDK_DIR="$sdk" bash scripts/lifecycle/build/sdk.sh --wasm
+          prefix="$RUNNER_TEMP/pack-install/wasm"
+          bash scripts/ci/check-pack-sdk-build.sh --pack "$GITHUB_WORKSPACE/idleot-client" --wasm \
+            --sdk "$sdk" --prefix "$prefix" --build-dir "$RUNNER_TEMP/pack-build/wasm"
+          test -f "$prefix/lib/cmake/QtClientPack_idleot/QtClientPack_idleotConfig.cmake" || {
+            echo "::error::pack static-ABI export missing under $prefix/lib/cmake" >&2
+            exit 1
+          }
+          QTCLIENT_PACKS="$prefix" bash scripts/lifecycle/build/wasm.sh
           bin=""
           for cand in build/tibia-wasm/bin build/tibia-wasm; do
             if [[ -f "$cand/tibia.wasm" && -f "$cand/tibia.js" ]]; then
@@ -472,18 +474,18 @@ jobs:
             fi
           done
           [[ -n "$bin" ]] || {
-            echo "::error::linked tip tibia.wasm missing after qtclient wasm build" >&2
+            echo "::error::tip tibia.wasm missing after qtclient wasm build" >&2
             find build/tibia-wasm -name 'tibia.*' 2>/dev/null | head -40 || true
             exit 1
           }
           pack="$bin/mods/idleot"
           [[ -f "$pack/mod.json" ]] || {
-            echo "::error::linked tip mods/idleot/mod.json missing (QTCLIENT_LINKED_PACK stage)" >&2
+            echo "::error::tip mods/idleot/mod.json missing (QTCLIENT_PACKS stage)" >&2
             find "$bin" -path '*/mods/*' 2>/dev/null | head -40 || true
             exit 1
           }
           if [[ -d "$pack/native" ]] || find "$pack" -name 'mod.wasm' 2>/dev/null | grep -q .; then
-            echo "::error::native/mod.wasm must not ship on linked tip" >&2
+            echo "::error::native/ must not ship on the wasm tip (static-ABI pack)" >&2
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/linked-tip"
