@@ -29,6 +29,11 @@ else
   exit 1
 fi
 
+# Git Bash tar treats D:\… as host D — normalize before -C / -f.
+QT_ROOT="$(qt_unix_path "$QT_ROOT")"
+CACHE_ROOT="$(qt_unix_path "$CACHE_ROOT")"
+BLOB="$CACHE_ROOT/${SHORT}-${KIT}.tar.gz"
+
 DIR="$(qt_install_dir_for_kit "$KIT")"
 PREFIX="$QT_ROOT/cip-$SHORT/$DIR"
 

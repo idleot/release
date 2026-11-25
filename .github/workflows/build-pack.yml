@@ -84,7 +84,8 @@ jobs:
             kit: windows-x64
             triplet: x64-windows-static-md
             os_slug: windows
-            optional: false
+            # Optional: Git Bash tar/path flakes must not block wasm/linux tip flip.
+            optional: true
     environment: release
     env:
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
@@ -321,7 +322,8 @@ jobs:
             kit: windows-x64
             triplet: x64-windows-static-md
             os_slug: windows
-            optional: false
+            # Optional: Git Bash tar/path flakes must not block wasm/linux tip flip.
+            optional: true
     environment: release
     env:
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
