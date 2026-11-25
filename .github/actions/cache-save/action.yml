@@ -32,6 +32,10 @@ inputs:
   unique:
     required: false
     default: ${{ github.sha }}
+  unique_ccache:
+    description: 'Optional ccache primary-key suffix (prefer qtclient_sha so pack cuts share objects)'
+    required: false
+    default: ''
   vcpkg_cache_hit:
     description: 'From cache-restore vcpkg-cache-hit (skip Actions save when true)'
     required: false
@@ -62,6 +66,7 @@ runs:
         BASELINE_IN: ${{ inputs.baseline }}
         VCPKG_JSON: ${{ inputs.vcpkg_json }}
         UNIQUE: ${{ inputs.unique }}
+        UNIQUE_CCACHE: ${{ inputs.unique_ccache }}
       run: |
         set -euo pipefail
         # shellcheck source=../cache-common.sh
@@ -80,7 +85,8 @@ runs:
           TIP_TAG="${TRIPLET}-${BASELINE12}"
           IMM_TAG="${TRIPLET}-${BASELINE12}-${UNIQUE:0:12}"
         fi
-        CCACHE_KEY="ccache-${SCOPE}-${OS_SLUG}-${UNIQUE}"
+        CCACHE_UNIQUE="${UNIQUE_CCACHE:-$UNIQUE}"
+        CCACHE_KEY="ccache-${SCOPE}-${OS_SLUG}-${CCACHE_UNIQUE}"
         {
           echo "vcpkg_dir=$VCPKG_DIR"
           echo "ccache_dir=$CCACHE_DIR_PATH"

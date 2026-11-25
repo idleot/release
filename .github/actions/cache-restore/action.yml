@@ -31,9 +31,13 @@ inputs:
     required: false
     default: ''
   unique:
-    description: 'Unique Actions primary-key suffix so each run can save a new tip'
+    description: 'Unique Actions primary-key suffix for vcpkg (and ccache unless unique_ccache set)'
     required: false
     default: ${{ github.sha }}
+  unique_ccache:
+    description: 'Optional ccache primary-key suffix (prefer qtclient_sha so pack cuts share objects)'
+    required: false
+    default: ''
 outputs:
   vcpkg-cache-hit:
     description: 'true when Actions exact vcpkg key hit'
@@ -68,6 +72,7 @@ runs:
         BASELINE_IN: ${{ inputs.baseline }}
         VCPKG_JSON: ${{ inputs.vcpkg_json }}
         UNIQUE: ${{ inputs.unique }}
+        UNIQUE_CCACHE: ${{ inputs.unique_ccache }}
       run: |
         set -euo pipefail
         # shellcheck source=../cache-common.sh
@@ -85,7 +90,8 @@ runs:
           VCPKG_KEY="vcpkg-${TRIPLET}-${BASELINE12}-${UNIQUE}"
           TIP_TAG="${TRIPLET}-${BASELINE12}"
         fi
-        CCACHE_KEY="ccache-${SCOPE}-${OS_SLUG}-${UNIQUE}"
+        CCACHE_UNIQUE="${UNIQUE_CCACHE:-$UNIQUE}"
+        CCACHE_KEY="ccache-${SCOPE}-${OS_SLUG}-${CCACHE_UNIQUE}"
         {
           echo "vcpkg_dir=$VCPKG_DIR"
           echo "ccache_dir=$CCACHE_DIR_PATH"
@@ -93,8 +99,9 @@ runs:
           echo "ccache_key=$CCACHE_KEY"
           echo "baseline12=$BASELINE12"
           echo "tip_tag=$TIP_TAG"
+          echo "ccache_unique=$CCACHE_UNIQUE"
         } >> "$GITHUB_OUTPUT"
-        echo "[ci-cache] restore kind=$KIND os=$OS_SLUG triplet=${TRIPLET:--} scope=$SCOPE"
+        echo "[ci-cache] restore kind=$KIND os=$OS_SLUG triplet=${TRIPLET:--} scope=$SCOPE ccache_unique=$CCACHE_UNIQUE"
 
     - name: Restore vcpkg (Actions)
       id: vcpkg
@@ -135,5 +142,6 @@ runs:
           ccache-${{ inputs.scope }}-${{ inputs.os }}
           ccache-client-${{ inputs.os }}-
           ccache-client-${{ inputs.os }}
+          ccache-pack-${{ inputs.os }}-
           ccache-pack-${{ inputs.os }}
           ccache-pack-wasm

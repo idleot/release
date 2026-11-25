@@ -1,20 +1,13 @@
 ---
-# Build qtclient tips with the IdleOT pack on **public** runners (free minutes).
-# Host and pack builds are decoupled (host API v9):
-#   1. qtclient pack SDK (QtClientSdk: abi headers + cmake config; configure-only)
-#   2. the pack against that SDK alone (idleot-client scripts/lifecycle/build/pack.sh)
-#        desktop: runtime MODULE  → mods/idleot/native/mod.{dylib,so,dll}
-#        wasm:    static-ABI .a   → exported QtClientPack::idleot
-#   3. the qtclient tip with -DQTCLIENT_PACKS=<pack install prefix>
-#        desktop: stages mods/idleot (native/ must ship); wasm: links the archive into
-#        tibia.wasm (native/ must not ship).
-# Private idleot-client is checked out with RELEASE_TOKEN; the qtclient tree provides
-# cmake/Qt/emsdk and the SDK sources.
+# Build IdleOT packs on **public** runners (free minutes).
 #
-# Compile/dep cache: same qtclient contract via vendored
-# .github/actions/cache-{restore,save} (workspace/.cache/{vcpkg,ccache} + qtclient GHCR
-# vcpkg tip). Checkout **this** repo first so local actions stay on disk — packing
-# idleot-client into $GITHUB_WORKSPACE would wipe .github/actions.
+# Host API v9 — two layers so the mod overlaps qtclient Client:ci after SDK:
+#   pack-mod:  SDK → IdleOT MODULE / static-ABI .a  (needs client-sdk + CIP Qt only)
+#   tip-link:  QTCLIENT_PACKS=<prefix> → product tip (desktop brand.cmake / wasm link)
+#
+# Private idleot-client is checked out with RELEASE_TOKEN; the qtclient tree provides
+# cmake/Qt/emsdk. Compile/dep cache via vendored .github/actions/cache-{restore,save}.
+# Checkout **this** repo first so local actions stay on disk.
 name: Build pack
 
 on:
@@ -48,6 +41,9 @@ env:
   IDLEOT_CLIENT_REPO: ${{ github.repository_owner }}/idleot-client
   HOST_OWNER: qtclient
   QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
+  # Fail-fast: kit preflight already gated; pack jobs must not hang 2h.
+  QT_PULL_WAIT_SECS: '900'
+  QT_PULL_INTERVAL_SECS: '30'
 
 jobs:
   meta:
@@ -60,13 +56,12 @@ jobs:
         run: |
           echo "pack_tag=${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}" >> "$GITHUB_OUTPUT"
 
-  pack-desktop:
-    name: pack-${{ matrix.plat }}
+  # ── pack-mod (desktop): SDK → MODULE only ─────────────────────────────
+  pack-mod-desktop:
+    name: pack-mod-${{ matrix.plat }}
     needs: [meta]
     if: inputs.build_desktop
     runs-on: ${{ matrix.runner }}
-    # macos kit can lag (cancelled kit job → missing ghcr tag). Do not block
-    # wasm/linux/windows assemble + CDN tip flip on that leg alone.
     continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
@@ -94,15 +89,13 @@ jobs:
     env:
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
     steps:
-      # Keep release .github/actions on disk for cache-restore/save.
-      - name: Checkout release (cache actions + stamp script)
+      - name: Checkout release (cache actions + scripts)
         uses: actions/checkout@v5
         with:
           sparse-checkout: |
             .github/actions
-            scripts/stamp-mod-urls.py
-            scripts/upload-desktop-symbols.py
-          sparse-checkout-cone-mode: false
+            scripts
+          sparse-checkout-cone-mode: true
 
       - name: Checkout idleot-client pack sources
         uses: actions/checkout@v5
@@ -127,15 +120,238 @@ jobs:
       - uses: oras-project/setup-oras@v1
       - uses: lukka/get-cmake@v4.3.4
 
-      # qtclient-* packages are public. Do NOT oras-login with idleot GITHUB_TOKEN
-      # first — installation tokens 403 cross-org pulls even when the package is public.
-      - name: Wait + pull qtclient client-sdk
+      - name: Try restore pack-mod from GHCR
+        id: packmod
+        shell: bash
+        run: |
+          oras logout ghcr.io 2>/dev/null || true
+          bash scripts/pull-pack-mod.sh \
+            "ghcr.io/${{ github.repository_owner }}/pack-mod-idleot-${{ matrix.plat }}:${{ needs.meta.outputs.pack_tag }}" \
+            "$RUNNER_TEMP/pack-install/desktop"
+
+      - name: MSVC environment
+        if: runner.os == 'Windows' && steps.packmod.outputs.pack_mod_hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Resolve CIP Qt SHA
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        id: cip
+        shell: bash
+        working-directory: _qtclient
+        run: |
+          set -euo pipefail
+          source tools/qt/qt-version.sh
+          SHA="$(qt_resolve_cip_sha)"
+          [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Pull client-sdk (linux ORAS; readiness gate on all plats)
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
         shell: bash
         run: |
           oras logout ghcr.io 2>/dev/null || true
           bash _qtclient/scripts/ci/pull-client-sdk.sh \
             "ghcr.io/${HOST_OWNER}/client-sdk:${{ inputs.qtclient_sha }}" \
             "$RUNNER_TEMP/client-sdk"
+
+      - name: Restore Qt kit Actions blob
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        id: qtkit
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/qt-kit
+          key: qt-kit-${{ steps.cip.outputs.sha }}-${{ matrix.kit }}
+          restore-keys: |
+            qt-kit-${{ steps.cip.outputs.sha }}-${{ matrix.kit }}
+            qt-kit-${{ matrix.kit }}-
+
+      - name: Unpack Qt kit from Actions cache
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        shell: bash
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          QTCLIENT_ROOT: ${{ github.workspace }}/_qtclient
+        run: bash scripts/cache-qt-kit.sh unpack "${{ steps.cip.outputs.sha }}" "${{ matrix.kit }}" "$QT_ROOT" || true
+
+      - name: Restore vcpkg + ccache
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        id: cache
+        uses: ./.github/actions/cache-restore
+        with:
+          kind: both
+          os: ${{ matrix.os_slug }}
+          triplet: ${{ matrix.triplet }}
+          scope: pack
+          vcpkg_json: _qtclient/vcpkg.json
+          ghcr_vcpkg: ghcr.io/qtclient/vcpkg-cache
+          unique: ${{ inputs.qtclient_sha }}
+          unique_ccache: ${{ inputs.qtclient_sha }}
+
+      - name: qtclient host bootstrap (deps + vcpkg + CIP Qt)
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        shell: bash
+        working-directory: _qtclient
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_ACTOR: ${{ github.repository_owner }}
+          QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
+          QT_PULL_ONLY: '1'
+          QT_PULL_WAIT_SECS: ${{ env.QT_PULL_WAIT_SECS }}
+          QT_PULL_INTERVAL_SECS: ${{ env.QT_PULL_INTERVAL_SECS }}
+        run: bash tools/qt/ci-setup.sh --pull-only --with-vcpkg --with-deps
+
+      - name: Save Qt kit Actions blob
+        if: steps.packmod.outputs.pack_mod_hit != 'true' && steps.qtkit.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          QTCLIENT_ROOT: ${{ github.workspace }}/_qtclient
+        run: bash scripts/cache-qt-kit.sh pack "${{ steps.cip.outputs.sha }}" "${{ matrix.kit }}" "$QT_ROOT"
+
+      - name: Persist Qt kit cache
+        if: steps.packmod.outputs.pack_mod_hit != 'true' && steps.qtkit.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/qt-kit
+          key: qt-kit-${{ steps.cip.outputs.sha }}-${{ matrix.kit }}
+
+      - name: Build IdleOT pack MODULE (SDK only)
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        shell: bash
+        working-directory: _qtclient
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          VCPKG_TARGET_TRIPLET: ${{ matrix.triplet }}
+          VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          ccache -z || true
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            export PATH="$(brew --prefix)/bin:$PATH"
+          fi
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            export PATH="/c/ProgramData/chocolatey/bin:/c/tools/zstd:$PATH"
+          fi
+          export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+          sdk="$RUNNER_TEMP/qtclient-sdk/desktop"
+          # Prefer published linux ORAS SDK; macOS/Windows need a local sdk.sh
+          # against the platform kit (ORAS SDK is linux-oriented).
+          if [[ "$RUNNER_OS" == Linux && -f "$RUNNER_TEMP/client-sdk/lib/cmake/QtClientSdk/QtClientSdkConfig.cmake" ]]; then
+            sdk="$RUNNER_TEMP/client-sdk"
+          else
+            QTCLIENT_SDK_DIR="$sdk" bash scripts/lifecycle/build/sdk.sh
+          fi
+          prefix="$RUNNER_TEMP/pack-install/desktop"
+          bash scripts/ci/check-pack-sdk-build.sh --pack "$GITHUB_WORKSPACE/idleot-client" \
+            --sdk "$sdk" --prefix "$prefix" --build-dir "$RUNNER_TEMP/pack-build/desktop"
+          ls "$prefix/mods/idleot/native/"mod.* >/dev/null 2>&1 || {
+            echo "::error::pack MODULE missing: $prefix/mods/idleot/native/mod.*" >&2
+            exit 1
+          }
+          ccache -s || true
+
+      - name: Save vcpkg + ccache
+        if: always() && steps.packmod.outputs.pack_mod_hit != 'true'
+        uses: ./.github/actions/cache-save
+        with:
+          kind: both
+          os: ${{ matrix.os_slug }}
+          triplet: ${{ matrix.triplet }}
+          scope: pack
+          vcpkg_json: _qtclient/vcpkg.json
+          ghcr_vcpkg: ''
+          unique: ${{ inputs.qtclient_sha }}
+          unique_ccache: ${{ inputs.qtclient_sha }}
+          vcpkg_cache_hit: ${{ steps.cache.outputs.vcpkg-cache-hit }}
+          ccache_hit: ${{ steps.cache.outputs.ccache-hit }}
+
+      - name: Upload pack-mod artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-mod-idleot-${{ matrix.plat }}
+          path: ${{ runner.temp }}/pack-install/desktop
+          retention-days: 2
+          include-hidden-files: true
+
+      - name: Login GHCR (oras) for idleot push
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        shell: bash
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push pack-mod to GHCR
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          tar -czf pack-mod.tgz -C pack-install/desktop .
+          tag="${{ needs.meta.outputs.pack_tag }}"
+          oras push "ghcr.io/${{ github.repository_owner }}/pack-mod-idleot-${{ matrix.plat }}:${tag}" \
+            "pack-mod.tgz:application/vnd.oci.image.layer.v1.tar+gzip"
+
+  # ── tip-link (desktop): pack MODULE → product tip ─────────────────────
+  tip-link-desktop:
+    name: tip-link-${{ matrix.plat }}
+    needs: [meta, pack-mod-desktop]
+    if: inputs.build_desktop && always() && (needs.pack-mod-desktop.result == 'success' || needs.pack-mod-desktop.result == 'skipped')
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.optional }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plat: linux-x64
+            runner: ubuntu-24.04
+            kit: linux-x64
+            triplet: x64-linux-static
+            os_slug: linux
+            optional: false
+          - plat: macos-arm64
+            runner: macos-15
+            kit: macos-arm64
+            triplet: arm64-osx-static
+            os_slug: macos
+            optional: true
+          - plat: windows-x64
+            runner: windows-2022
+            kit: windows-x64
+            triplet: x64-windows-static-md
+            os_slug: windows
+            optional: false
+    environment: release
+    env:
+      QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
+    steps:
+      - name: Checkout release (cache actions + scripts)
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            .github/actions
+            scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Checkout qtclient host tree
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.QTCLIENT_REPO }}
+          ref: ${{ inputs.qtclient_sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          path: _qtclient
+          persist-credentials: false
+          submodules: false
+
+      - uses: oras-project/setup-oras@v1
+      - uses: lukka/get-cmake@v4.3.4
+
+      - name: Download pack-mod
+        uses: actions/download-artifact@v4
+        with:
+          name: pack-mod-idleot-${{ matrix.plat }}
+          path: ${{ runner.temp }}/pack-install/desktop
 
       - name: MSVC environment
         if: runner.os == 'Windows'
@@ -154,6 +370,22 @@ jobs:
           [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
+      - name: Restore Qt kit Actions blob
+        id: qtkit
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/qt-kit
+          key: qt-kit-${{ steps.cip.outputs.sha }}-${{ matrix.kit }}
+          restore-keys: |
+            qt-kit-${{ steps.cip.outputs.sha }}-${{ matrix.kit }}
+
+      - name: Unpack Qt kit from Actions cache
+        shell: bash
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          QTCLIENT_ROOT: ${{ github.workspace }}/_qtclient
+        run: bash scripts/cache-qt-kit.sh unpack "${{ steps.cip.outputs.sha }}" "${{ matrix.kit }}" "$QT_ROOT" || true
+
       - name: Restore vcpkg + ccache
         id: cache
         uses: ./.github/actions/cache-restore
@@ -164,7 +396,8 @@ jobs:
           scope: pack
           vcpkg_json: _qtclient/vcpkg.json
           ghcr_vcpkg: ghcr.io/qtclient/vcpkg-cache
-          unique: ${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}
+          unique: ${{ inputs.qtclient_sha }}
+          unique_ccache: ${{ inputs.qtclient_sha }}
 
       - name: qtclient host bootstrap (deps + vcpkg + CIP Qt)
         shell: bash
@@ -175,10 +408,26 @@ jobs:
           GITHUB_ACTOR: ${{ github.repository_owner }}
           QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
           QT_PULL_ONLY: '1'
-          QT_PULL_WAIT_SECS: '7200'
+          QT_PULL_WAIT_SECS: ${{ env.QT_PULL_WAIT_SECS }}
+          QT_PULL_INTERVAL_SECS: ${{ env.QT_PULL_INTERVAL_SECS }}
         run: bash tools/qt/ci-setup.sh --pull-only --with-vcpkg --with-deps
 
-      - name: Build qtclient tip with the IdleOT pack (SDK → pack MODULE → tip)
+      - name: Save Qt kit Actions blob
+        if: steps.qtkit.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          QTCLIENT_ROOT: ${{ github.workspace }}/_qtclient
+        run: bash scripts/cache-qt-kit.sh pack "${{ steps.cip.outputs.sha }}" "${{ matrix.kit }}" "$QT_ROOT"
+
+      - name: Persist Qt kit cache
+        if: steps.qtkit.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/qt-kit
+          key: qt-kit-${{ steps.cip.outputs.sha }}-${{ matrix.kit }}
+
+      - name: Build qtclient tip with IdleOT pack (QTCLIENT_PACKS)
         shell: bash
         working-directory: _qtclient
         env:
@@ -195,6 +444,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
+          ccache -z || true
           if [[ "$RUNNER_OS" == macOS ]]; then
             export PATH="$(brew --prefix)/bin:$PATH"
           fi
@@ -203,21 +453,13 @@ jobs:
           fi
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
           export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
-          # 1. pack SDK (QtClientSdk) for this qtclient commit + kit — compiles nothing.
-          sdk="$RUNNER_TEMP/qtclient-sdk/desktop"
-          QTCLIENT_SDK_DIR="$sdk" bash scripts/lifecycle/build/sdk.sh
-          # 2. the pack against the SDK alone — the gate IS the pack build (static
-          #    contract, no host paths in the build graph, zero tip imports).
           prefix="$RUNNER_TEMP/pack-install/desktop"
-          bash scripts/ci/check-pack-sdk-build.sh --pack "$GITHUB_WORKSPACE/idleot-client" \
-            --sdk "$sdk" --prefix "$prefix" --build-dir "$RUNNER_TEMP/pack-build/desktop"
           ls "$prefix/mods/idleot/native/"mod.* >/dev/null 2>&1 || {
-            echo "::error::pack MODULE missing: $prefix/mods/idleot/native/mod.*" >&2
+            echo "::error::pack-mod artifact missing native/mod.* under $prefix" >&2
+            find "$prefix" -maxdepth 4 2>/dev/null | head -80 || true
             exit 1
           }
-          # 3. the tip, taking the installed pack as an input.
           QTCLIENT_PACKS="$prefix" bash scripts/lifecycle/build/desktop.sh
-          # Launcher installer needs bin/launcher next to the client in the tip.
           bash scripts/lifecycle/build/desktop.sh --launcher
           bin="$(bash scripts/lifecycle/lib/find-client-bin.sh . 2>/dev/null || true)"
           [[ -n "$bin" && -e "$bin" ]] || {
@@ -225,13 +467,11 @@ jobs:
             exit 1
           }
           tip="$(dirname "$bin")"
-          # find-client-bin may land inside *.app/Contents/MacOS — package wants bin/.
           case "$tip" in
             *.app/Contents/MacOS) tip="$(cd "$tip/../../.." && pwd)" ;;
           esac
           pack="$tip/mods/idleot"
           if [[ ! -f "$pack/mod.json" ]]; then
-            # macOS: mods live under client.app/Contents/MacOS/mods/idleot
             pack="$(find "$tip" -path '*/mods/idleot/mod.json' 2>/dev/null | head -1 | xargs dirname || true)"
           fi
           [[ -n "${pack:-}" && -f "$pack/mod.json" ]] || {
@@ -239,11 +479,8 @@ jobs:
             find "$tip" -path '*/mods/*' 2>/dev/null | head -40 || true
             exit 1
           }
-          # Desktop ships the pack MODULE (host API v9).
           bash scripts/lifecycle/lib/check-tip-pack-presence.sh \
             --tip "$(dirname "$(dirname "$pack")")" --id idleot --native
-          # Stamp tip pack URLs before packaging so the tip artifact ships production bases
-          # (urls.* + launchersettings.URLS.systemSurvey).
           python3 "$GITHUB_WORKSPACE/scripts/stamp-mod-urls.py" "$pack/mod.json" \
             --site "$TIBIA_SITE_URL" --asset "$TIBIA_ASSET_BASE" --payments "$QTCLIENT_PAYMENTS_URL"
           if grep -q '127.0.0.1' "$pack/mod.json"; then
@@ -252,18 +489,11 @@ jobs:
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/pack"
-          # Artifact keeps FS chrome for assemble brand/stamp; tip binary tree is
-          # published via qtclient desktop package below when present.
           cp -a "$pack" "$RUNNER_TEMP/pack/idleot"
-          # Also stage tip root marker so assemble can find the qtclient tip.
-          mkdir -p "$RUNNER_TEMP/pack/linked-tip-meta"
-          echo "$tip" >"$RUNNER_TEMP/pack/linked-tip-meta/tip-dir.txt"
-          # Package qtclient desktop tip (engine + mods + launcher) for assemble.
           PACKAGE_OUT="$RUNNER_TEMP/pack/linked-tip" \
             QTCLIENT_PLATFORM="${{ matrix.plat }}" \
             PLATFORM="${{ matrix.plat }}" \
             bash scripts/lifecycle/package/desktop.sh
-          # Fail early if launcher did not land in the tip (assemble needs it).
           if [[ ! -e "$RUNNER_TEMP/pack/linked-tip/bin/launcher" \
              && ! -e "$RUNNER_TEMP/pack/linked-tip/bin/launcher.exe" \
              && ! -d "$RUNNER_TEMP/pack/linked-tip/bin/launcher.app" ]]; then
@@ -271,12 +501,8 @@ jobs:
             ls -la "$RUNNER_TEMP/pack/linked-tip/bin" 2>/dev/null || true
             exit 1
           fi
+          ccache -s || true
 
-      # Breakpad symbols for desktop crash reports (client, launcher, bundled Qt).
-      # Straight to the portal's symbol store, never into an artifact or the log:
-      # this repo is public. Only modules the store lacks are uploaded.
-      # Hard cap: a hung portal upload must not block tip artifacts (v1.0.219
-      # linux sat here >40m). continue-on-error only helps after the step exits.
       - name: Upload desktop crash symbols
         continue-on-error: true
         timeout-minutes: 8
@@ -312,7 +538,6 @@ jobs:
           esac
           bin="$(find "$dir" -type f \( -name dump_syms -o -name dump_syms.exe \) | head -1)"
           chmod +x "$bin"
-          # Windows: the client's and launcher's PDBs stay in the build tree.
           pdbs=()
           while IFS= read -r pdb; do pdbs+=("$pdb"); done \
             < <(find _qtclient/build -path '*/bin/*' -name '*.pdb' 2>/dev/null)
@@ -329,7 +554,8 @@ jobs:
           scope: pack
           vcpkg_json: _qtclient/vcpkg.json
           ghcr_vcpkg: ''
-          unique: ${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}
+          unique: ${{ inputs.qtclient_sha }}
+          unique_ccache: ${{ inputs.qtclient_sha }}
           vcpkg_cache_hit: ${{ steps.cache.outputs.vcpkg-cache-hit }}
           ccache_hit: ${{ steps.cache.outputs.ccache-hit }}
 
@@ -349,23 +575,9 @@ jobs:
           retention-days: 2
           include-hidden-files: true
 
-
-      - name: Login GHCR (oras) for idleot push
-        shell: bash
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Push pack to GHCR (cache for retries)
-        shell: bash
-        working-directory: ${{ runner.temp }}
-        run: |
-          set -euo pipefail
-          tar -czf pack.tgz -C pack idleot
-          tag="${{ needs.meta.outputs.pack_tag }}"
-          oras push "ghcr.io/${{ github.repository_owner }}/pack-idleot-${{ matrix.plat }}:${tag}" \
-            "pack.tgz:application/vnd.oci.image.layer.v1.tar+gzip"
-
-  pack-wasm:
-    name: pack-wasm
+  # ── pack-mod (wasm): SDK → static-ABI .a only ─────────────────────────
+  pack-mod-wasm:
+    name: pack-mod-wasm
     needs: [meta]
     if: inputs.build_wasm
     runs-on: ubuntu-24.04
@@ -373,13 +585,13 @@ jobs:
     env:
       QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
     steps:
-      - name: Checkout release (cache actions + stamp script)
+      - name: Checkout release (cache actions + scripts)
         uses: actions/checkout@v5
         with:
           sparse-checkout: |
             .github/actions
-            scripts/stamp-mod-urls.py
-          sparse-checkout-cone-mode: false
+            scripts
+          sparse-checkout-cone-mode: true
 
       - name: Checkout idleot-client pack sources
         uses: actions/checkout@v5
@@ -404,13 +616,188 @@ jobs:
       - uses: oras-project/setup-oras@v1
       - uses: lukka/get-cmake@v4.3.4
 
-      # qtclient-* packages are public — pull anonymously (see pack-desktop note).
-      - name: Wait + pull qtclient client-sdk
+      - name: Try restore pack-mod from GHCR
+        id: packmod
         run: |
           oras logout ghcr.io 2>/dev/null || true
-          bash _qtclient/scripts/ci/pull-client-sdk.sh \
-            "ghcr.io/${HOST_OWNER}/client-sdk:${{ inputs.qtclient_sha }}" \
-            "$RUNNER_TEMP/client-sdk"
+          bash scripts/pull-pack-mod.sh \
+            "ghcr.io/${{ github.repository_owner }}/pack-mod-idleot-wasm:${{ needs.meta.outputs.pack_tag }}" \
+            "$RUNNER_TEMP/pack-install/wasm"
+
+      - name: Resolve CIP Qt SHA
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        id: cip
+        working-directory: _qtclient
+        run: |
+          set -euo pipefail
+          source tools/qt/qt-version.sh
+          SHA="$(qt_resolve_cip_sha)"
+          [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Qt kit Actions blob
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        id: qtkit
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/qt-kit
+          key: qt-kit-${{ steps.cip.outputs.sha }}-wasm_multithread
+          restore-keys: |
+            qt-kit-${{ steps.cip.outputs.sha }}-wasm_multithread
+
+      - name: Unpack Qt kit from Actions cache
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          QTCLIENT_ROOT: ${{ github.workspace }}/_qtclient
+        run: bash scripts/cache-qt-kit.sh unpack "${{ steps.cip.outputs.sha }}" wasm_multithread "$QT_ROOT" || true
+
+      - name: Restore vcpkg + ccache
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        id: cache
+        uses: ./.github/actions/cache-restore
+        with:
+          kind: both
+          os: wasm
+          triplet: wasm32-emscripten
+          scope: pack
+          vcpkg_json: _qtclient/vcpkg.json
+          ghcr_vcpkg: ghcr.io/qtclient/vcpkg-cache
+          unique: ${{ inputs.qtclient_sha }}
+          unique_ccache: ${{ inputs.qtclient_sha }}
+
+      - name: qtclient host bootstrap (deps + vcpkg + CIP Qt wasm)
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        working-directory: _qtclient
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_ACTOR: ${{ github.repository_owner }}
+          QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
+          QT_PULL_ONLY: '1'
+          QT_PULL_WAIT_SECS: ${{ env.QT_PULL_WAIT_SECS }}
+          QT_PULL_INTERVAL_SECS: ${{ env.QT_PULL_INTERVAL_SECS }}
+        run: bash tools/qt/ci-setup.sh --wasm --pull-only --with-vcpkg --with-deps
+
+      - name: Save Qt kit Actions blob
+        if: steps.packmod.outputs.pack_mod_hit != 'true' && steps.qtkit.outputs.cache-hit != 'true'
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          QTCLIENT_ROOT: ${{ github.workspace }}/_qtclient
+        run: bash scripts/cache-qt-kit.sh pack "${{ steps.cip.outputs.sha }}" wasm_multithread "$QT_ROOT"
+
+      - name: Persist Qt kit cache
+        if: steps.packmod.outputs.pack_mod_hit != 'true' && steps.qtkit.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/qt-kit
+          key: qt-kit-${{ steps.cip.outputs.sha }}-wasm_multithread
+
+      - name: Build IdleOT wasm pack (static-ABI against SDK)
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        working-directory: _qtclient
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          VCPKG_TARGET_TRIPLET: wasm32-emscripten
+          VCPKG_MANIFEST_DIR: ${{ github.workspace }}/_qtclient
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          ccache -z || true
+          export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
+          sdk="$RUNNER_TEMP/qtclient-sdk/wasm"
+          # Prefer published wasm SDK ORAS when present (one-shot; no long wait).
+          if bash "$GITHUB_WORKSPACE/scripts/try-pull-client-sdk.sh" \
+              "ghcr.io/${HOST_OWNER}/client-sdk-wasm:${{ inputs.qtclient_sha }}" \
+              "$RUNNER_TEMP/client-sdk-wasm"; then
+            sdk="$RUNNER_TEMP/client-sdk-wasm"
+            echo "[pack-mod-wasm] using client-sdk-wasm ORAS"
+          else
+            echo "[pack-mod-wasm] client-sdk-wasm miss — local sdk.sh --wasm"
+            QTCLIENT_SDK_DIR="$sdk" bash scripts/lifecycle/build/sdk.sh --wasm
+          fi
+          prefix="$RUNNER_TEMP/pack-install/wasm"
+          bash scripts/ci/check-pack-sdk-build.sh --pack "$GITHUB_WORKSPACE/idleot-client" --wasm \
+            --sdk "$sdk" --prefix "$prefix" --build-dir "$RUNNER_TEMP/pack-build/wasm"
+          test -f "$prefix/lib/cmake/QtClientPack_idleot/QtClientPack_idleotConfig.cmake" || {
+            echo "::error::pack static-ABI export missing under $prefix/lib/cmake" >&2
+            exit 1
+          }
+          ccache -s || true
+
+      - name: Save vcpkg + ccache
+        if: always() && steps.packmod.outputs.pack_mod_hit != 'true'
+        uses: ./.github/actions/cache-save
+        with:
+          kind: both
+          os: wasm
+          triplet: wasm32-emscripten
+          scope: pack
+          vcpkg_json: _qtclient/vcpkg.json
+          ghcr_vcpkg: ''
+          unique: ${{ inputs.qtclient_sha }}
+          unique_ccache: ${{ inputs.qtclient_sha }}
+          vcpkg_cache_hit: ${{ steps.cache.outputs.vcpkg-cache-hit }}
+          ccache_hit: ${{ steps.cache.outputs.ccache-hit }}
+
+      - name: Upload pack-mod-wasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-mod-idleot-wasm
+          path: ${{ runner.temp }}/pack-install/wasm
+          retention-days: 2
+          include-hidden-files: true
+
+      - name: Login GHCR (oras) for idleot push
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push pack-mod-wasm to GHCR
+        if: steps.packmod.outputs.pack_mod_hit != 'true'
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          tar -czf pack-mod.tgz -C pack-install/wasm .
+          tag="${{ needs.meta.outputs.pack_tag }}"
+          oras push "ghcr.io/${{ github.repository_owner }}/pack-mod-idleot-wasm:${tag}" \
+            "pack-mod.tgz:application/vnd.oci.image.layer.v1.tar+gzip"
+
+  # ── tip-link (wasm): static-ABI pack → linked tibia.wasm ──────────────
+  tip-link-wasm:
+    name: tip-link-wasm
+    needs: [meta, pack-mod-wasm]
+    if: inputs.build_wasm && needs.pack-mod-wasm.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: release
+    env:
+      QTCLIENT_HOST_BUILD_ID: ${{ inputs.qtclient_sha }}
+    steps:
+      - name: Checkout release (cache actions + scripts)
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            .github/actions
+            scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Checkout qtclient host tree
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.QTCLIENT_REPO }}
+          ref: ${{ inputs.qtclient_sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+          path: _qtclient
+          persist-credentials: false
+          submodules: false
+
+      - uses: oras-project/setup-oras@v1
+      - uses: lukka/get-cmake@v4.3.4
+
+      - name: Download pack-mod-wasm
+        uses: actions/download-artifact@v4
+        with:
+          name: pack-mod-idleot-wasm
+          path: ${{ runner.temp }}/pack-install/wasm
 
       - name: Resolve CIP Qt SHA
         id: cip
@@ -422,6 +809,21 @@ jobs:
           [[ -n "$SHA" ]] || { echo "no qt5-cip SHA" >&2; exit 1; }
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
+      - name: Restore Qt kit Actions blob
+        id: qtkit
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/qt-kit
+          key: qt-kit-${{ steps.cip.outputs.sha }}-wasm_multithread
+          restore-keys: |
+            qt-kit-${{ steps.cip.outputs.sha }}-wasm_multithread
+
+      - name: Unpack Qt kit from Actions cache
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          QTCLIENT_ROOT: ${{ github.workspace }}/_qtclient
+        run: bash scripts/cache-qt-kit.sh unpack "${{ steps.cip.outputs.sha }}" wasm_multithread "$QT_ROOT" || true
+
       - name: Restore vcpkg + ccache
         id: cache
         uses: ./.github/actions/cache-restore
@@ -432,7 +834,8 @@ jobs:
           scope: pack
           vcpkg_json: _qtclient/vcpkg.json
           ghcr_vcpkg: ghcr.io/qtclient/vcpkg-cache
-          unique: ${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}
+          unique: ${{ inputs.qtclient_sha }}
+          unique_ccache: ${{ inputs.qtclient_sha }}
 
       - name: qtclient host bootstrap (deps + vcpkg + CIP Qt wasm)
         working-directory: _qtclient
@@ -442,10 +845,25 @@ jobs:
           GITHUB_ACTOR: ${{ github.repository_owner }}
           QT_CIP_SHA: ${{ steps.cip.outputs.sha }}
           QT_PULL_ONLY: '1'
-          QT_PULL_WAIT_SECS: '7200'
+          QT_PULL_WAIT_SECS: ${{ env.QT_PULL_WAIT_SECS }}
+          QT_PULL_INTERVAL_SECS: ${{ env.QT_PULL_INTERVAL_SECS }}
         run: bash tools/qt/ci-setup.sh --wasm --pull-only --with-vcpkg --with-deps
 
-      - name: Build qtclient wasm tip with the IdleOT pack (wasm SDK → static-ABI pack → tip)
+      - name: Save Qt kit Actions blob
+        if: steps.qtkit.outputs.cache-hit != 'true'
+        env:
+          QT_ROOT: ${{ runner.temp }}/Qt
+          QTCLIENT_ROOT: ${{ github.workspace }}/_qtclient
+        run: bash scripts/cache-qt-kit.sh pack "${{ steps.cip.outputs.sha }}" wasm_multithread "$QT_ROOT"
+
+      - name: Persist Qt kit cache
+        if: steps.qtkit.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/qt-kit
+          key: qt-kit-${{ steps.cip.outputs.sha }}-wasm_multithread
+
+      - name: Link IdleOT pack into wasm tip
         working-directory: _qtclient
         env:
           QT_ROOT: ${{ runner.temp }}/Qt
@@ -461,17 +879,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$CCACHE_DIR"
+          ccache -z || true
           export CMAKE_PREFIX_PATH="${QT_PREFIX}${CMAKE_PREFIX_PATH:+;$CMAKE_PREFIX_PATH}"
           export TIBIA_SITE_URL IDLEOT_SITE_URL TIBIA_ASSET_BASE IDLEOT_ASSET_BASE QTCLIENT_PAYMENTS_URL
-          # 1. wasm pack SDK; 2. the pack's static-ABI archive against it alone;
-          # 3. the tip links that installed archive (QtClientPack::idleot).
-          sdk="$RUNNER_TEMP/qtclient-sdk/wasm"
-          QTCLIENT_SDK_DIR="$sdk" bash scripts/lifecycle/build/sdk.sh --wasm
           prefix="$RUNNER_TEMP/pack-install/wasm"
-          bash scripts/ci/check-pack-sdk-build.sh --pack "$GITHUB_WORKSPACE/idleot-client" --wasm \
-            --sdk "$sdk" --prefix "$prefix" --build-dir "$RUNNER_TEMP/pack-build/wasm"
           test -f "$prefix/lib/cmake/QtClientPack_idleot/QtClientPack_idleotConfig.cmake" || {
-            echo "::error::pack static-ABI export missing under $prefix/lib/cmake" >&2
+            echo "::error::pack-mod-wasm artifact missing QtClientPack_idleot under $prefix" >&2
+            find "$prefix" -maxdepth 4 2>/dev/null | head -80 || true
             exit 1
           }
           QTCLIENT_PACKS="$prefix" bash scripts/lifecycle/build/wasm.sh
@@ -508,7 +922,6 @@ jobs:
             cat "$tip_pack/mod.json" >&2
             exit 1
           fi
-          # Re-fingerprint after URL stamp so /play OPFS sees the tip bytes.
           python3 - "$tip_pack" <<'PY'
           import hashlib, sys
           from pathlib import Path
@@ -525,10 +938,8 @@ jobs:
           (root / ".pack.stamp").write_text(h.hexdigest() + "\n")
           print("[pack] .pack.stamp", h.hexdigest()[:16])
           PY
+          ccache -s || true
 
-      # Function names for /play crash stacks (Safari gives only wasm-function[N]).
-      # Goes straight to the portal's symbol store, never into an artifact:
-      # this repo is public and the symbol map names the client's functions.
       - name: Upload tibia.wasm symbol map
         continue-on-error: true
         env:
@@ -561,7 +972,8 @@ jobs:
           scope: pack
           vcpkg_json: _qtclient/vcpkg.json
           ghcr_vcpkg: ''
-          unique: ${{ inputs.idleot_client_sha }}-host-${{ inputs.qtclient_sha }}
+          unique: ${{ inputs.qtclient_sha }}
+          unique_ccache: ${{ inputs.qtclient_sha }}
           vcpkg_cache_hit: ${{ steps.cache.outputs.vcpkg-cache-hit }}
           ccache_hit: ${{ steps.cache.outputs.ccache-hit }}
 
@@ -572,28 +984,3 @@ jobs:
           path: ${{ runner.temp }}/linked-tip
           retention-days: 2
           include-hidden-files: true
-
-
-      - name: Login GHCR (oras) for idleot push
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Push pack-wasm to GHCR
-        working-directory: ${{ runner.temp }}
-        run: |
-          set -euo pipefail
-          # Build step stages the qtclient tip under linked-tip/ (artifact path).
-          # ORAS cache matches desktop: pack/idleot only.
-          tip_pack="$(find linked-tip -path '*/mods/idleot/mod.json' 2>/dev/null | head -1 | xargs -r dirname || true)"
-          [[ -n "${tip_pack:-}" && -f "$tip_pack/mod.json" ]] || tip_pack="linked-tip/mods/idleot"
-          [[ -f "$tip_pack/mod.json" ]] || {
-            echo "::error::no stamped mods/idleot under linked-tip for ORAS push" >&2
-            find linked-tip -path '*/mods/*' 2>/dev/null | head -40 || true
-            exit 1
-          }
-          mkdir -p pack
-          rm -rf pack/idleot
-          cp -a "$tip_pack" pack/idleot
-          tar -czf pack.tgz -C pack idleot
-          tag="${{ needs.meta.outputs.pack_tag }}"
-          oras push "ghcr.io/${{ github.repository_owner }}/pack-idleot-wasm:${tag}" \
-            "pack.tgz:application/vnd.oci.image.layer.v1.tar+gzip"

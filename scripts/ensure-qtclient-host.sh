@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Ensure qtclient published client-sdk ORAS for SHA. Pack builds only need the
-# SDK; IdleOT linked tips carry the product binary. Stock client-{plat,wasm}
-# ORAS are not a release gate.
+# Ensure qtclient published client-sdk ORAS for SHA. Pack-mod jobs only need the
+# SDK; IdleOT tip-link builds the product binary. Stock client-{plat,wasm}
+# ORAS are not a release gate. CIP Qt kits are gated separately by
+# ensure-qt-kits.sh (fail-fast before pack-mod burns hours in --pull-only).
 #
 # If client-sdk is missing, wait on an existing Client:ci for that SHA
 # (push/PR/dispatch), or dispatch Client:ci, then poll GHCR for the SDK tip

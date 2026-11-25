@@ -23,8 +23,9 @@ git push origin v1.4.0
 
 ```
 resolve (all components)
-  -> qtclient host dispatch ‖ server image ‖ portal image
-  -> IdleOT packs (after qtclient ORAS) -> assemble tips (qtclient+pack tag)
+  -> client-sdk (+ kit gate) ‖ server image ‖ portal image
+  -> pack-mod (IdleOT MODULE / wasm .a) → tip-link (product tip)
+  -> assemble tips (qtclient+pack tag)
   -> bundle -> verify -> record-live
   -> deploy server → CDN tip flip → portal | Pages
   -> :latest = live, GitHub Release on the umbrella tag
@@ -32,23 +33,25 @@ resolve (all components)
 
 Client path:
 
-1. **Ensure qtclient host** — `scripts/ensure-qtclient-host.sh` dispatches public
-   `qtclient` `Client:ci` at the qtclient pin when `client-*` ORAS is missing, then
-   waits for `client-sdk` / `client-wasm` / `client-<plat>:<sha>`.
-2. **Build IdleOT packs** on this public repo (`build-pack.yml`) — checks out
-   private `idleot-client` with `RELEASE_TOKEN`. Host and pack builds are decoupled:
-   the qtclient pack SDK (`scripts/lifecycle/build/sdk.sh`, QtClientSdk: abi headers +
-   cmake config, compiles nothing) → the pack against that SDK alone
-   (`idleot-client/scripts/lifecycle/build/pack.sh`; desktop runtime MODULE
-   `mods/idleot/native/mod.{dylib,so,dll}`, wasm static-ABI archive) → the tip with
-   `QTCLIENT_PACKS=<pack install prefix>`. Desktop tips must ship `native/mod.*`
-   (Developer ID / Trusted Signing sign `mod.dylib` / `mod.dll` before the app); wasm
-   tips must not (the pack is linked into `tibia.wasm`).
-3. **Assemble** tip (merge `mods/idleot`) → GHCR slices tagged
+1. **Ensure qtclient SDK + CIP Qt kits** — `scripts/ensure-qtclient-host.sh`
+   dispatches public `qtclient` `Client:ci` when `client-sdk` ORAS is missing and
+   waits for that tip only (not the desktop/wasm matrix). Then
+   `scripts/ensure-qt-kits.sh` fail-fast-checks CIP Qt kits for
+   linux/macos/windows/wasm (~15m max). Stock `client-{plat,wasm}` ORAS are not
+   a release gate.
+2. **pack-mod** (`build-pack.yml`) — IdleOT mod against the SDK alone (desktop
+   MODULE `mods/idleot/native/mod.*`, wasm static-ABI `.a`). Retries pull
+   `pack-mod-idleot-{plat}:{pack_tag}` from GHCR and skip compile. ccache keys
+   use the qtclient SHA so consecutive cuts share objects; Qt kits are also
+   Actions-cached under `.cache/qt-kit/`.
+3. **tip-link** — `QTCLIENT_PACKS=<pack install prefix>` → product tip
+   (`desktop.sh` / `wasm.sh`). Desktop tips must ship `native/mod.*` (signed
+   before the app); wasm tips must not (pack linked into `tibia.wasm`).
+4. **Assemble** → GHCR slices tagged
    `${idleot_client_sha}-host-${qtclient_sha}` (and aliased to `:${qtclient_sha}`).
 
-qtclient tibia/wasm is never compiled in this repo except as the product tip with the pack
-(`build-pack.yml`); stock tips come from qtclient's own CI.
+qtclient publishes `client-sdk` and `client-sdk-wasm`; Release builds the IdleOT
+mod and product tip. Stock tips still come from qtclient's own CI (ccache seed).
 
 There is **no portal login gate**. Releases match CIP: bounce/restart the game
 world (clients see unreachable / connection-lost), flip
@@ -71,13 +74,14 @@ launcher (`/launcher/tibiametadata.json`).
   launcher | server+portal | assets` (`auto` = pin-diff since previous `v*`).
 - **Rollback** — older tag + `skip_build`.
 
-### Speed (no warm dependency)
+### Speed
 
-Wall-clock is `max(qtclient full matrix, server, portal) + packs + assemble +
-promote`. qtclient wasm is usually the long pole. Optional: self-hosted Linux
-runners with persistent ccache/Qt for the qtclient tip + pack builds (label via qtclient /
-Release `runs-on`; do not put builders on the game host). Compile caches speed
-jobs; Release never assumes qtclient main already published the pin.
+Wall-clock ≈ `max(pack-mod, leftover Client:ci, server, portal) + tip-link +
+bundle + promote`. Publish CIP Qt kits before tagging (kit gate fails in
+~15m). Tips already in GHCR → ~20m (bundle floor). Warm rebuilds are usually
+Windows tip-link. GitHub-hosted caches: Actions ccache (keyed by qtclient SHA),
+vcpkg GHCR tip, Qt kit blobs, pack-mod ORAS. `client-builder-linux` is built
+in-repo for a future linux container path (image needs cmake/oras/zstd first).
 
 ## Privacy
 
