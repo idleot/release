@@ -74,6 +74,8 @@ jobs:
     name: Ensure qtclient host + tip plan
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # RELEASE_TOKEN lives in the release environment (kit gate + Client:ci dispatch).
+    environment: release
     outputs:
       wasm: ${{ steps.exists.outputs.wasm }}
       desktop: ${{ steps.exists.outputs.desktop }}
@@ -94,7 +96,8 @@ jobs:
         with:
           repository: ${{ env.QTCLIENT_REPO }}
           ref: ${{ env.SHA }}
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # Public qtclient; never pass an empty token (checkout@v5 rejects "").
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
           path: _qtclient
           persist-credentials: false
           sparse-checkout: |
