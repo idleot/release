@@ -264,15 +264,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push otclient-wasm tip (pack + qtclient alias)
+      - name: Push wasm tip (otclient-wasm + tibia-wasm aliases)
         working-directory: ${{ runner.temp }}/slice
         run: |
           printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
           pack_tag="${{ needs.check.outputs.pack_tag }}"
+          # Dual-publish: keep otclient-wasm for live compose; tibia-wasm is the new name.
           docker buildx build --push --provenance=false --sbom=false \
             -f Dockerfile.slice \
             -t "${{ env.REGISTRY }}/otclient-wasm:${pack_tag}" \
-            -t "${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}" .
+            -t "${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}" \
+            -t "${{ env.REGISTRY }}/tibia-wasm:${pack_tag}" \
+            -t "${{ env.REGISTRY }}/tibia-wasm:${{ env.SHA }}" .
 
   desktop:
     name: Assemble desktop (${{ matrix.platform }})

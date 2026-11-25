@@ -29,7 +29,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-# Monorepo: apps/qtclient. Standalone release checkout may still have apps/otclient alias.
+# Monorepo / release checkout: apps/qtclient.
 _ROOT = Path(__file__).resolve().parents[2]
 OTC = _ROOT / "qtclient" if (_ROOT / "qtclient").is_dir() else _ROOT / "otclient"
 
