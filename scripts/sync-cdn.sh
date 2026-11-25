@@ -54,9 +54,27 @@ setup_ssh() {
   fi
 }
 
-remote() { "${SSH[@]}" "$@"; }
+# Retry bare ssh and rsync on unexplained SSH drops (exit 255 / kex reset).
+# Blobs starts with remote mkdir — without this the first mid-kex reset aborts
+# the whole assemble job before any rsync_retry runs.
+ssh_retry() {
+  local attempt=1 max=5 rc
+  while true; do
+    if "${SSH[@]}" "$@"; then
+      return 0
+    fi
+    rc=$?
+    if [[ $rc -ne 255 ]] || [[ $attempt -ge $max ]]; then
+      return "$rc"
+    fi
+    echo "[sync-cdn] ssh drop (rc=$rc) — retry ${attempt}/${max} in $((attempt * 3))s"
+    sleep $((attempt * 3))
+    attempt=$((attempt + 1))
+  done
+}
 
-# Retry rsync on unexplained SSH drops (exit 255 / connection reset by peer).
+remote() { ssh_retry "$@"; }
+
 rsync_retry() {
   local attempt=1 max=5 rc
   while true; do
