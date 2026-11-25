@@ -21,12 +21,27 @@ REF="${DISPATCH_REF:-main}"
 fields=(-f "release_id=${RELEASE_ID}")
 for kv in "$@"; do fields+=(-f "$kv"); done
 
-gh workflow run "$WORKFLOW" -R "$REPO" --ref "$REF" "${fields[@]}" >/dev/null
+# GitHub occasionally returns HTTP 500 on workflow_dispatch (v1.0.220 portal).
+dispatched=0
+for attempt in $(seq 1 6); do
+  if gh workflow run "$WORKFLOW" -R "$REPO" --ref "$REF" "${fields[@]}" >/dev/null 2>"$RUNNER_TEMP/dispatch.err"; then
+    dispatched=1
+    break
+  fi
+  err="$(cat "$RUNNER_TEMP/dispatch.err" 2>/dev/null || true)"
+  echo "[dispatch] attempt ${attempt}/6 failed: ${err:-unknown}"
+  sleep $((attempt * 4))
+done
+if [[ "$dispatched" -ne 1 ]]; then
+  echo "::error::could not create workflow dispatch for ${REPO##*/} ${WORKFLOW}"
+  exit 1
+fi
 echo "[dispatch] ${REPO##*/} ${WORKFLOW} @ ${REF} (${RELEASE_ID})"
 
 run_id=""
-for _ in $(seq 1 36); do
-  run_id="$(gh run list -R "$REPO" -w "$WORKFLOW" -e workflow_dispatch -L 20 \
+# Up to ~5 min: private repos can lag before the run appears in list.
+for _ in $(seq 1 60); do
+  run_id="$(gh run list -R "$REPO" -w "$WORKFLOW" -e workflow_dispatch -L 30 \
     --json databaseId,displayTitle \
     --jq ".[] | select(.displayTitle | contains(\"${RELEASE_ID}\")) | .databaseId" | head -n1)"
   [[ -n "$run_id" ]] && break
