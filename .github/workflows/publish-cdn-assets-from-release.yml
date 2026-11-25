@@ -1,0 +1,62 @@
+# One-shot: pull a private cipsoft-data release asset (cdn-assets slice tarball)
+# and push ghcr.io/idleot/cdn-assets. Used when a local publish cannot push
+# (operator PAT lacks write:packages) but CI GITHUB_TOKEN can.
+name: Publish cdn-assets from slice release
+
+on:
+  workflow_dispatch:
+    inputs:
+      cipsoft_release_tag:
+        description: cipsoft-data release tag that holds the .tgz slice
+        required: true
+        type: string
+      asset_name:
+        description: release asset filename
+        required: true
+        type: string
+        default: cdn-assets-slice.tgz
+      image_tag:
+        description: extra tag besides :latest (optional)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download slice tarball
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAG: ${{ inputs.cipsoft_release_tag }}
+          ASSET: ${{ inputs.asset_name }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo idleot/cipsoft-data -p "$ASSET" -O slice.tgz
+          ls -lh slice.tgz
+
+      - name: Build and push ghcr.io/idleot/cdn-assets
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p slice && tar -xzf slice.tgz -C slice
+          # tarball root is "assets/"
+          root=slice/assets
+          [[ -d "$root" ]] || root=slice
+          printf 'FROM scratch\nCOPY . /\n' > Dockerfile
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          tags=(-t ghcr.io/idleot/cdn-assets:latest)
+          if [[ -n "$IMAGE_TAG" ]]; then
+            tags+=(-t "ghcr.io/idleot/cdn-assets:$IMAGE_TAG")
+          fi
+          docker build "${tags[@]}" -f Dockerfile "$root"
+          docker push ghcr.io/idleot/cdn-assets:latest
+          if [[ -n "$IMAGE_TAG" ]]; then
+            docker push "ghcr.io/idleot/cdn-assets:$IMAGE_TAG"
+          fi
+          echo "Pushed ghcr.io/idleot/cdn-assets:latest${IMAGE_TAG:+ and :$IMAGE_TAG}"
