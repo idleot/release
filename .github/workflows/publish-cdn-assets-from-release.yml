@@ -28,6 +28,7 @@ permissions:
 jobs:
   push:
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - name: Download slice tarball
         env:
