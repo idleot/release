@@ -11,6 +11,10 @@ Stock host is apps/qtclient (public qtclient/qtclient). Product pack is
 apps/idleot-client — a pack pin change rebuilds the client (cmake links the
 MODULE at configure time).
 
+Portal image is idleot/portal (Web Mod at apps/idleot-portal). The OSS Host
+lives at apps/portal (qtclient/portal) and is embedded via the Web Mod's
+portal.ref — bump that when Host changes, then pin apps/idleot-portal.
+
 Env:
   GH_TOKEN     token that can read idleot/idleot (and idleot/portal contents)
   OWNER        GitHub org (idleot)
@@ -37,13 +41,17 @@ API = "https://api.github.com"
 ENGINES = {
     "client": "apps/qtclient",
     "server": "apps/crystalserver",
-    "portal": "apps/portal",
+    # Web Mod repo (idleot/portal). Host pin is apps/portal → portal.ref inside the Mod.
+    "portal": "apps/idleot-portal",
 }
+# OSS Host (qtclient/portal). Not a deployable by itself; changes select "portal"
+# so the Web Mod image rebuilds after portal.ref is bumped.
+HOST_PORTAL = "apps/portal"
 # Product packs are not standalone deployables — pin changes select "client".
 PACKS = {
     "idleot_client": "apps/idleot-client",
 }
-PINS = {**ENGINES, **PACKS}
+PINS = {**ENGINES, **PACKS, "portal_host": HOST_PORTAL}
 COMPONENTS = [*ENGINES, "launcher"]
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -72,15 +80,25 @@ def pins(repo: str, ref: str) -> dict[str, str]:
         entry = gh(f"/repos/{repo}/contents/{path}?ref={ref}")
         if entry and entry.get("type") == "submodule":
             out[comp] = entry["sha"]
-        elif comp in PACKS:
-            # Pack submodule may be absent on older tags; empty means stock-only build.
+        elif comp in PACKS or comp == "portal_host":
+            # Pack / Host may be absent on older tags.
             out[comp] = ""
+        elif comp == "portal":
+            # Pre–Web Mod split: apps/portal was idleot/portal itself.
+            legacy = gh(f"/repos/{repo}/contents/apps/portal?ref={ref}")
+            if legacy and legacy.get("type") == "submodule":
+                out[comp] = legacy["sha"]
+            else:
+                raise SystemExit(f"[resolve] {path} is not a submodule at {ref}")
         else:
             raise SystemExit(f"[resolve] {path} is not a submodule at {ref}")
     return out
 
 
 def launcher_version(owner: str, portal_sha: str) -> str | None:
+    """Tauri launcher lived under idleot/portal; gone after the Qt launcher cut."""
+    if not portal_sha:
+        return None
     try:
         entry = gh(f"/repos/{owner}/portal/contents/apps/launcher/package.json?ref={portal_sha}")
     except SystemExit as exc:
@@ -143,8 +161,11 @@ def main() -> int:
             # Pack pin change → rebuild client (MODULE is compiled into the host).
             if before.get("idleot_client") != current.get("idleot_client"):
                 selected.add("client")
+            # Host pin change (apps/portal) → rebuild portal once portal.ref is bumped.
+            if before.get("portal_host") != current.get("portal_host"):
+                selected.add("portal")
             if "portal" in selected and tauri_version:
-                if tauri_version != launcher_version(owner, before["portal"]):
+                if tauri_version != launcher_version(owner, before.get("portal") or ""):
                     selected.add("launcher")
             reason = f"changed since {prev}"
     elif mode == "all":
