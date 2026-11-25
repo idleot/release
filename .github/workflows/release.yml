@@ -64,7 +64,7 @@ jobs:
     environment: release
     outputs:
       release_id: ${{ steps.id.outputs.release_id }}
-      otclient_sha: ${{ steps.pins.outputs.otclient_sha }}
+      otclient_sha: ${{ steps.pins.outputs.qtclient_sha }}
       qtclient_sha: ${{ steps.pins.outputs.qtclient_sha }}
       idleot_client_sha: ${{ steps.pins.outputs.idleot_client_sha }}
       crystalserver_sha: ${{ steps.pins.outputs.crystalserver_sha }}
@@ -117,7 +117,7 @@ jobs:
         env:
           CLIENT: ${{ needs.resolve.outputs.client }}
           SERVER: ${{ needs.resolve.outputs.server }}
-          OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
+          QTCLIENT_SHA: ${{ needs.resolve.outputs.qtclient_sha }}
           IDLEOT_CLIENT_SHA: ${{ needs.resolve.outputs.idleot_client_sha }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
         run: bash scripts/require-images.sh
@@ -129,7 +129,7 @@ jobs:
     uses: ./.github/workflows/build-client.yml
     secrets: inherit
     with:
-      qtclient_sha: ${{ needs.resolve.outputs.qtclient_sha || needs.resolve.outputs.otclient_sha }}
+      qtclient_sha: ${{ needs.resolve.outputs.qtclient_sha }}
       idleot_client_sha: ${{ needs.resolve.outputs.idleot_client_sha }}
       release_id: ${{ needs.resolve.outputs.release_id }}
 
@@ -186,8 +186,8 @@ jobs:
     secrets: inherit
     with:
       # Prefer qtclient+pack tip tag from assemble; alias :qtclient_sha also pushed.
-      wasm_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha) || 'latest' }}
-      desktop_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.otclient_sha) || 'latest' }}
+      wasm_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.qtclient_sha) || 'latest' }}
+      desktop_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.qtclient_sha) || 'latest' }}
       desktop_image: ${{ needs.build-client.outputs.desktop_image }}
       launcher_tag: ${{ needs.build-launcher.outputs.version || 'latest' }}
       release_id: ${{ needs.resolve.outputs.release_id }}
@@ -219,7 +219,7 @@ jobs:
           REGISTRY: ${{ env.REGISTRY }}
           CLIENT: ${{ needs.resolve.outputs.client }}
           SERVER: ${{ needs.resolve.outputs.server }}
-          OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
+          QTCLIENT_SHA: ${{ needs.resolve.outputs.qtclient_sha }}
           PACK_SHA: ${{ needs.resolve.outputs.idleot_client_sha }}
           TIP_TAG: ${{ needs.build-client.outputs.tip_tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
@@ -236,11 +236,11 @@ jobs:
             fi
           }
           if [[ "$CLIENT" == true ]]; then
-            tag="${TIP_TAG:-${PACK_SHA}-host-${OTC_SHA}}"
-            need "$REGISTRY/otclient-wasm:$tag"
+            tag="${TIP_TAG:-${PACK_SHA}-host-${QTCLIENT_SHA}}"
+            need "$REGISTRY/tibia-wasm:$tag"
             need "$REGISTRY/$DESKTOP_IMAGE:$tag"
             echo "### Client tip" >> "$GITHUB_STEP_SUMMARY"
-            echo "- qtclient \`${OTC_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- qtclient \`${QTCLIENT_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
             echo "- pack \`${PACK_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
             echo "- tip tag \`${tag}\`" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -552,7 +552,7 @@ jobs:
           CLIENT: ${{ needs.resolve.outputs.client }}
           RUNTIME_TAG: ${{ needs.bundle.outputs.runtime_tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
-          OTC_SHA: ${{ needs.resolve.outputs.otclient_sha }}
+          QTCLIENT_SHA: ${{ needs.resolve.outputs.qtclient_sha }}
           DESKTOP_IMAGE: ${{ needs.build-client.outputs.desktop_image || 'tibia-desktop' }}
           LAUNCHER_VERSION: ${{ needs.build-launcher.outputs.version }}
         run: |
@@ -560,8 +560,8 @@ jobs:
           [[ "$SERVER" == success ]] && retag crystalserver "$CRYSTAL_SHA"
           if [[ "$PROMOTE" == success ]]; then
             if [[ "$CLIENT" == true ]]; then
-              retag otclient-wasm "$OTC_SHA"
-              retag "$DESKTOP_IMAGE" "$OTC_SHA"
+              retag tibia-wasm "$QTCLIENT_SHA"
+              retag "$DESKTOP_IMAGE" "$QTCLIENT_SHA"
             fi
             [[ -n "$LAUNCHER_VERSION" ]] && retag launcher "$LAUNCHER_VERSION"
             # Thin runtime: keep :runtime and :latest pointing at the live nginx image.
@@ -589,7 +589,7 @@ jobs:
           REF: ${{ needs.resolve.outputs.ref }}
         run: |
           notes="$(printf 'otclient %s\ncrystalserver %s\nportal %s\nclient=%s server=%s portal=%s launcher=%s cdn_runtime=%s\nrun %s/%s/actions/runs/%s\n' \
-            "${{ needs.resolve.outputs.otclient_sha }}" "${{ needs.resolve.outputs.crystalserver_sha }}" \
+            "${{ needs.resolve.outputs.qtclient_sha }}" "${{ needs.resolve.outputs.crystalserver_sha }}" \
             "${{ needs.resolve.outputs.portal_sha }}" "${{ needs.resolve.outputs.client }}" \
             "${{ needs.resolve.outputs.server }}" "${{ needs.resolve.outputs.portal }}" \
             "${{ needs.build-launcher.outputs.version || 'unchanged' }}" "${{ needs.bundle.outputs.runtime_tag }}" \

@@ -76,8 +76,8 @@ jobs; Release never assumes qtclient main already published the pin.
 This repo is public; the engines are not.
 
 - Product client is **tibia** (qtclient, compiled QML). Desktop slice is
-  `tibia-desktop`; WASM slice dual-publishes `otclient-wasm` (live compose)
-  and `tibia-wasm` (new name; cut over deploy envs when ready).
+  `tibia-desktop`; WASM slice is `tibia-wasm` (legacy `otclient-wasm` alias
+  still pushed for one release cycle).
 - Compiler output goes to files; logs show only an error summary.
 - Opaque caches only: pinned Qt SDK/emsdk and **ccache** object stores (no
   source trees in cache artifacts).
@@ -103,7 +103,7 @@ healthz
 
 | Slice | Image | Built by |
 |-------|-------|----------|
-| WASM | `ghcr.io/idleot/{otclient-wasm,tibia-wasm}:<pack>-host-<qtclient-sha>` (+ SHA aliases) | `build-client.yml` (ensure qtclient host + pack, assemble tip) |
+| WASM | `ghcr.io/idleot/tibia-wasm:<pack>-host-<qtclient-sha>` (+ SHA alias; legacy `otclient-wasm`) | `build-client.yml` (ensure qtclient host + pack, assemble tip) |
 | Desktop store | `ghcr.io/idleot/tibia-desktop:<pack>-host-<qtclient-sha>` (+ qtclient SHA alias) | same |
 | Thin CDN runtime | `ghcr.io/idleot/cdn:runtime-<hash>` | `bundle.yml` (nginx config only) |
 | Assets | `ghcr.io/idleot/cdn-assets` | `publish-assets --push` |
@@ -162,7 +162,7 @@ tag → resolve → build missing images → assemble+emit_cip
 ```
 
 - **Desktop:** `tibia-desktop` + installers → `tibiaclient-{windows,macos,linux}-current`
-- **Browser:** `otclient-wasm` → `tibiaclient-web-current` + `launcher-web-current`.
+- **Browser:** `tibia-wasm` → `tibiaclient-web-current` + `launcher-web-current`.
   Both carry the tip pack as desktop does: the client package has the engine
   and `mods/<id>/` in `Contents/MacOS` (CipSoft's bundle layout), the launcher
   package has `mods/<id>/` brand (`brand.json`, `mod.json`, `images/launcher/`)
@@ -174,6 +174,6 @@ tag → resolve → build missing images → assemble+emit_cip
 The Qt launcher ships with the client/CDN bundle. Installers are listed by
 `/download` from `latest/desktop.json`.
 
-Every private package (`otclient-wasm`, `tibia-desktop`, `cdn`, `cdn-assets`,
+Every private package (`tibia-wasm`, `tibia-desktop`, `cdn`, `cdn-assets`,
 `crystalserver`) grants this repo **Actions access: Admin**. Portal images stay
 in `idleot/portal`; release only points Coolify at `portal:<sha>`.

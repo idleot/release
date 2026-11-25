@@ -48,7 +48,7 @@ on:
   workflow_dispatch:
     inputs:
       wasm_tag:
-        description: otclient-wasm tag (otclient SHA or latest)
+        description: tibia-wasm tag (qtclient SHA or latest)
         default: latest
       desktop_tag:
         description: desktop slice tag (otclient SHA or latest)
@@ -152,7 +152,7 @@ jobs:
           ASSETS_TAG: ${{ inputs.assets_tag }}
           LAUNCHER_TAG: ${{ inputs.launcher_tag }}
         run: |
-          bash scripts/extract-image.sh "$REGISTRY/otclient-wasm:${WASM_TAG}" / slices/wasm
+          bash scripts/extract-image.sh "$REGISTRY/tibia-wasm:${WASM_TAG}" / slices/wasm
           bash scripts/extract-image.sh "$REGISTRY/${DESKTOP_IMAGE}:${DESKTOP_TAG}" / slices/desktop
           bash scripts/extract-image.sh "$REGISTRY/cdn-assets:${ASSETS_TAG}" / slices/assets
           bash scripts/extract-image.sh "$REGISTRY/launcher:${LAUNCHER_TAG}" / slices/launcher

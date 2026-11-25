@@ -3,7 +3,7 @@
 # Pack builds need client-sdk only (ensure-qtclient-host). Desktop + wasm tips are the
 # linked-tip artifacts (STATIC IdleOT — no stock-ORAS merge fallback).
 #
-# Tip images: otclient-wasm / tibia-desktop tagged by qtclient+pack
+# Tip images: tibia-wasm / tibia-desktop tagged by qtclient+pack
 #   (${idleot_client_sha}-host-${qtclient_sha}) and aliased to :${qtclient_sha}.
 name: Build client
 
@@ -121,7 +121,7 @@ jobs:
 
           need_pack=false
           for slice in wasm desktop; do
-            image="otclient-wasm"
+            image="tibia-wasm"
             [[ "$slice" == desktop ]] && image="$DESKTOP_IMAGE"
             if docker buildx imagetools inspect "$REGISTRY/$image:$pack_tag" >/dev/null 2>&1; then
               echo "$slice=true" >> "$GITHUB_OUTPUT"
@@ -264,18 +264,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push wasm tip (otclient-wasm + tibia-wasm aliases)
+      - name: Push tibia-wasm tip (+ legacy otclient-wasm alias)
         working-directory: ${{ runner.temp }}/slice
         run: |
           printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
           pack_tag="${{ needs.check.outputs.pack_tag }}"
-          # Dual-publish: keep otclient-wasm for live compose; tibia-wasm is the new name.
           docker buildx build --push --provenance=false --sbom=false \
             -f Dockerfile.slice \
-            -t "${{ env.REGISTRY }}/otclient-wasm:${pack_tag}" \
-            -t "${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}" \
             -t "${{ env.REGISTRY }}/tibia-wasm:${pack_tag}" \
-            -t "${{ env.REGISTRY }}/tibia-wasm:${{ env.SHA }}" .
+            -t "${{ env.REGISTRY }}/tibia-wasm:${{ env.SHA }}" \
+            -t "${{ env.REGISTRY }}/otclient-wasm:${pack_tag}" \
+            -t "${{ env.REGISTRY }}/otclient-wasm:${{ env.SHA }}" .
 
   desktop:
     name: Assemble desktop (${{ matrix.platform }})

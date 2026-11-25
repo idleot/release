@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Fail fast when release pins lack GHCR images (require_images path only).
-# Env: REGISTRY, OTC_SHA, optional IDLEOT_CLIENT_SHA / TIP_TAG, CRYSTAL_SHA,
-#      CLIENT/SERVER/PORTAL ("true"/"false"). DESKTOP_IMAGE defaults to tibia-desktop.
-# Client tips are qtclient+pack: prefer TIP_TAG or ${IDLEOT_CLIENT_SHA}-host-${OTC_SHA}.
+# Env: REGISTRY, QTCLIENT_SHA (or OTC_SHA compat), optional IDLEOT_CLIENT_SHA / TIP_TAG,
+#      CRYSTAL_SHA, CLIENT/SERVER/PORTAL ("true"/"false"). DESKTOP_IMAGE defaults to tibia-desktop.
+# Client tips are qtclient+pack: prefer TIP_TAG or ${IDLEOT_CLIENT_SHA}-host-${QTCLIENT_SHA}.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:?}"
 DESKTOP_IMAGE="${DESKTOP_IMAGE:-tibia-desktop}"
+QTCLIENT_SHA="${QTCLIENT_SHA:-${OTC_SHA:-}}"
 missing=0
 
 need() {
@@ -20,13 +21,13 @@ need() {
 }
 
 if [[ "${CLIENT:-false}" == "true" ]]; then
-  : "${OTC_SHA:?}"
+  : "${QTCLIENT_SHA:?}"
   tip="${TIP_TAG:-}"
   if [[ -z "$tip" && -n "${IDLEOT_CLIENT_SHA:-}" ]]; then
-    tip="${IDLEOT_CLIENT_SHA}-host-${OTC_SHA}"
+    tip="${IDLEOT_CLIENT_SHA}-host-${QTCLIENT_SHA}"
   fi
-  tip="${tip:-$OTC_SHA}"
-  need otclient-wasm "$tip" "client wasm tip"
+  tip="${tip:-$QTCLIENT_SHA}"
+  need tibia-wasm "$tip" "client wasm tip"
   need "$DESKTOP_IMAGE" "$tip" "client desktop tip"
 fi
 if [[ "${SERVER:-false}" == "true" ]]; then
