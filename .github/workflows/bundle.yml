@@ -31,6 +31,10 @@ on:
       launcher_tag:
         type: string
         default: latest
+      qtclient_sha:
+        type: string
+        default: ""
+        description: Host SHA for :qtclient_sha tip aliases (when wasm_tag is pack identity)
       release_id:
         type: string
         default: ""
@@ -62,6 +66,9 @@ on:
       launcher_tag:
         description: launcher tag (version or latest)
         default: latest
+      qtclient_sha:
+        description: Host SHA for :qtclient_sha tip aliases
+        default: ""
       release_id:
         description: Correlation id (set by release.yml)
         default: ""
@@ -160,16 +167,25 @@ jobs:
           DESKTOP_IMAGE: ${{ inputs.desktop_image || 'qtclient-desktop' }}
           ASSETS_TAG: ${{ inputs.assets_tag }}
           LAUNCHER_TAG: ${{ inputs.launcher_tag }}
+          QTCLIENT_SHA: ${{ inputs.qtclient_sha }}
         run: |
           # tibia-* → qtclient-* rename: copy legacy tip tags so extract never 404s.
           migrate() {
             local dest="$1" legacy="$2" tag="$3"
+            local sha_alias="${QTCLIENT_SHA:-}"
             if docker buildx imagetools inspect "$REGISTRY/$dest:$tag" >/dev/null 2>&1; then
+              if [[ -n "$sha_alias" && "$tag" != "$sha_alias" ]]; then
+                docker buildx imagetools create \
+                  -t "$REGISTRY/$dest:$sha_alias" \
+                  "$REGISTRY/$dest:$tag" >/dev/null 2>&1 || true
+              fi
               return 0
             fi
             if docker buildx imagetools inspect "$REGISTRY/$legacy:$tag" >/dev/null 2>&1; then
               echo "::notice::migrating $legacy:$tag → $dest"
-              docker buildx imagetools create -t "$REGISTRY/$dest:$tag" "$REGISTRY/$legacy:$tag"
+              local tags=(-t "$REGISTRY/$dest:$tag")
+              [[ -n "$sha_alias" && "$tag" != "$sha_alias" ]] && tags+=(-t "$REGISTRY/$dest:$sha_alias")
+              docker buildx imagetools create "${tags[@]}" "$REGISTRY/$legacy:$tag"
             fi
           }
           migrate qtclient-wasm tibia-wasm "$WASM_TAG"

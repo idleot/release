@@ -191,6 +191,7 @@ jobs:
       desktop_tag: ${{ needs.build-client.outputs.tip_tag || needs.resolve.outputs.pack_tag || needs.resolve.outputs.qtclient_sha || 'latest' }}
       desktop_image: ${{ needs.build-client.outputs.desktop_image || 'qtclient-desktop' }}
       launcher_tag: ${{ needs.build-launcher.outputs.version || 'latest' }}
+      qtclient_sha: ${{ needs.resolve.outputs.qtclient_sha }}
       release_id: ${{ needs.resolve.outputs.release_id }}
       publish_pages: false
 
@@ -554,15 +555,33 @@ jobs:
           RUNTIME_TAG: ${{ needs.bundle.outputs.runtime_tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
           QTCLIENT_SHA: ${{ needs.resolve.outputs.qtclient_sha }}
+          PACK_TAG: ${{ needs.build-client.outputs.tip_tag || needs.resolve.outputs.pack_tag }}
           DESKTOP_IMAGE: ${{ needs.build-client.outputs.desktop_image || 'qtclient-desktop' }}
           LAUNCHER_VERSION: ${{ needs.build-launcher.outputs.version }}
         run: |
           retag() { docker buildx imagetools create -t "$REGISTRY/$1:latest" "$REGISTRY/$1:$2" && echo "$1:$2 -> latest"; }
+          # Prefer pack tip tag; fall back to :qtclient_sha; create :sha alias when only pack exists.
+          retag_client() {
+            local image="$1" src=""
+            if [[ -n "$PACK_TAG" ]] && docker buildx imagetools inspect "$REGISTRY/$image:$PACK_TAG" >/dev/null 2>&1; then
+              src="$PACK_TAG"
+            elif docker buildx imagetools inspect "$REGISTRY/$image:$QTCLIENT_SHA" >/dev/null 2>&1; then
+              src="$QTCLIENT_SHA"
+            else
+              echo "::warning::no tip tag for $image (pack=$PACK_TAG sha=$QTCLIENT_SHA) — skip :latest"
+              return 0
+            fi
+            if [[ "$src" != "$QTCLIENT_SHA" ]]; then
+              docker buildx imagetools create -t "$REGISTRY/$image:$QTCLIENT_SHA" "$REGISTRY/$image:$src"
+              echo "$image:$src -> $QTCLIENT_SHA"
+            fi
+            retag "$image" "$src"
+          }
           [[ "$SERVER" == success ]] && retag crystalserver "$CRYSTAL_SHA"
           if [[ "$PROMOTE" == success ]]; then
             if [[ "$CLIENT" == true ]]; then
-              retag qtclient-wasm "$QTCLIENT_SHA"
-              retag "$DESKTOP_IMAGE" "$QTCLIENT_SHA"
+              retag_client qtclient-wasm
+              retag_client "$DESKTOP_IMAGE"
             fi
             [[ -n "$LAUNCHER_VERSION" ]] && retag launcher "$LAUNCHER_VERSION"
             # Thin runtime: keep :runtime and :latest pointing at the live nginx image.
