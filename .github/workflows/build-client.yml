@@ -120,13 +120,28 @@ jobs:
           pack_tag="${IDLEOT_CLIENT_SHA}-host-${SHA}"
           echo "pack_tag=$pack_tag" >> "$GITHUB_OUTPUT"
 
+          # Dist rename (tibia-* → qtclient-*): migrate legacy tip tags in place so
+          # CDN assemble can read qtclient-wasm / qtclient-desktop without rebuild.
           need_pack=false
           for slice in wasm desktop; do
             image="qtclient-wasm"
-            [[ "$slice" == desktop ]] && image="$DESKTOP_IMAGE"
+            legacy="tibia-wasm"
+            [[ "$slice" == desktop ]] && { image="$DESKTOP_IMAGE"; legacy="tibia-desktop"; }
             if docker buildx imagetools inspect "$REGISTRY/$image:$pack_tag" >/dev/null 2>&1; then
               echo "$slice=true" >> "$GITHUB_OUTPUT"
               echo "$image:$pack_tag exists — skip assemble"
+              # Keep :$SHA alias warm for skip_build CDN extract.
+              docker buildx imagetools create \
+                -t "$REGISTRY/$image:$SHA" \
+                "$REGISTRY/$image:$pack_tag" >/dev/null 2>&1 || true
+            elif docker buildx imagetools inspect "$REGISTRY/$legacy:$pack_tag" >/dev/null 2>&1; then
+              echo "::notice::migrating $legacy:$pack_tag → $image (+ :$SHA alias)"
+              docker buildx imagetools create \
+                -t "$REGISTRY/$image:$pack_tag" \
+                -t "$REGISTRY/$image:$SHA" \
+                "$REGISTRY/$legacy:$pack_tag"
+              echo "$slice=true" >> "$GITHUB_OUTPUT"
+              echo "$image:$pack_tag migrated from $legacy — skip assemble"
             else
               echo "$slice=false" >> "$GITHUB_OUTPUT"
               need_pack=true

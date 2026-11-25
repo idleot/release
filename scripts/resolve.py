@@ -167,13 +167,23 @@ def main() -> int:
         selected.discard("launcher")
         print("::notice::Tauri launcher removed — Qt launcher ships with the client")
 
+    idleot_client_sha = current.get("idleot_client") or ""
+    qtclient_sha = current["client"]
+    # Tip identity = pack + host (same as build-client pack_tag). CDN extract
+    # prefers this over :qtclient_sha alone when build-client is skipped.
+    pack_tag = (
+        f"{idleot_client_sha}-host-{qtclient_sha}"
+        if idleot_client_sha and qtclient_sha
+        else ""
+    )
     out = {
         "ref": ref,
         "previous": prev or "",
         "reason": reason,
-        "otclient_sha": current["client"],
-        "qtclient_sha": current["client"],
-        "idleot_client_sha": current.get("idleot_client") or "",
+        "otclient_sha": qtclient_sha,
+        "qtclient_sha": qtclient_sha,
+        "idleot_client_sha": idleot_client_sha,
+        "pack_tag": pack_tag,
         "crystalserver_sha": current["server"],
         "portal_sha": current["portal"],
         "client": str("client" in selected).lower(),

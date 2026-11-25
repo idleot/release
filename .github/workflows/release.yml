@@ -67,6 +67,7 @@ jobs:
       otclient_sha: ${{ steps.pins.outputs.qtclient_sha }}
       qtclient_sha: ${{ steps.pins.outputs.qtclient_sha }}
       idleot_client_sha: ${{ steps.pins.outputs.idleot_client_sha }}
+      pack_tag: ${{ steps.pins.outputs.pack_tag }}
       crystalserver_sha: ${{ steps.pins.outputs.crystalserver_sha }}
       portal_sha: ${{ steps.pins.outputs.portal_sha }}
       client: ${{ steps.pins.outputs.client }}
@@ -185,10 +186,10 @@ jobs:
     uses: ./.github/workflows/bundle.yml
     secrets: inherit
     with:
-      # Prefer qtclient+pack tip tag from assemble; alias :qtclient_sha also pushed.
-      wasm_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.qtclient_sha) || 'latest' }}
-      desktop_tag: ${{ needs.build-client.outputs.tip_tag || (needs.resolve.outputs.client == 'true' && needs.resolve.outputs.qtclient_sha) || 'latest' }}
-      desktop_image: ${{ needs.build-client.outputs.desktop_image }}
+      # Prefer pack tip tag (from assemble or resolve); :qtclient_sha alias is secondary.
+      wasm_tag: ${{ needs.build-client.outputs.tip_tag || needs.resolve.outputs.pack_tag || needs.resolve.outputs.qtclient_sha || 'latest' }}
+      desktop_tag: ${{ needs.build-client.outputs.tip_tag || needs.resolve.outputs.pack_tag || needs.resolve.outputs.qtclient_sha || 'latest' }}
+      desktop_image: ${{ needs.build-client.outputs.desktop_image || 'qtclient-desktop' }}
       launcher_tag: ${{ needs.build-launcher.outputs.version || 'latest' }}
       release_id: ${{ needs.resolve.outputs.release_id }}
       publish_pages: false

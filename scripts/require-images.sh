@@ -20,6 +20,18 @@ need() {
   fi
 }
 
+# Copy tibia-* tip tags onto qtclient-* when only the legacy name exists.
+migrate_tip() {
+  local dest="$1" legacy="$2" tag="$3"
+  if docker buildx imagetools inspect "${REGISTRY}/${dest}:${tag}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if docker buildx imagetools inspect "${REGISTRY}/${legacy}:${tag}" >/dev/null 2>&1; then
+    echo "::notice::migrating ${legacy}:${tag} → ${dest}"
+    docker buildx imagetools create -t "${REGISTRY}/${dest}:${tag}" "${REGISTRY}/${legacy}:${tag}"
+  fi
+}
+
 if [[ "${CLIENT:-false}" == "true" ]]; then
   : "${QTCLIENT_SHA:?}"
   tip="${TIP_TAG:-}"
@@ -27,6 +39,8 @@ if [[ "${CLIENT:-false}" == "true" ]]; then
     tip="${IDLEOT_CLIENT_SHA}-host-${QTCLIENT_SHA}"
   fi
   tip="${tip:-$QTCLIENT_SHA}"
+  migrate_tip qtclient-wasm tibia-wasm "$tip"
+  migrate_tip "$DESKTOP_IMAGE" tibia-desktop "$tip"
   need qtclient-wasm "$tip" "client wasm tip"
   need "$DESKTOP_IMAGE" "$tip" "client desktop tip"
 fi

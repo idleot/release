@@ -161,6 +161,19 @@ jobs:
           ASSETS_TAG: ${{ inputs.assets_tag }}
           LAUNCHER_TAG: ${{ inputs.launcher_tag }}
         run: |
+          # tibia-* → qtclient-* rename: copy legacy tip tags so extract never 404s.
+          migrate() {
+            local dest="$1" legacy="$2" tag="$3"
+            if docker buildx imagetools inspect "$REGISTRY/$dest:$tag" >/dev/null 2>&1; then
+              return 0
+            fi
+            if docker buildx imagetools inspect "$REGISTRY/$legacy:$tag" >/dev/null 2>&1; then
+              echo "::notice::migrating $legacy:$tag → $dest"
+              docker buildx imagetools create -t "$REGISTRY/$dest:$tag" "$REGISTRY/$legacy:$tag"
+            fi
+          }
+          migrate qtclient-wasm tibia-wasm "$WASM_TAG"
+          migrate "$DESKTOP_IMAGE" tibia-desktop "$DESKTOP_TAG"
           bash scripts/extract-image.sh "$REGISTRY/qtclient-wasm:${WASM_TAG}" / slices/wasm
           bash scripts/extract-image.sh "$REGISTRY/${DESKTOP_IMAGE}:${DESKTOP_TAG}" / slices/desktop
           bash scripts/extract-image.sh "$REGISTRY/cdn-assets:${ASSETS_TAG}" / slices/assets
