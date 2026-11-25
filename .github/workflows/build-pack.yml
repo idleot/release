@@ -269,8 +269,11 @@ jobs:
       # Breakpad symbols for desktop crash reports (client, launcher, bundled Qt).
       # Straight to the portal's symbol store, never into an artifact or the log:
       # this repo is public. Only modules the store lacks are uploaded.
+      # Hard cap: a hung portal upload must not block tip artifacts (v1.0.219
+      # linux sat here >40m). continue-on-error only helps after the step exits.
       - name: Upload desktop crash symbols
         continue-on-error: true
+        timeout-minutes: 8
         shell: bash
         env:
           TOKEN: ${{ secrets.QTCAAC_SYMBOL_UPLOAD_TOKEN }}
