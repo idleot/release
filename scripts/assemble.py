@@ -4,7 +4,7 @@
 Inputs (directories extracted from images; any may be missing):
   --previous  prior CDN tip (usually host latest/ + releases/ only; blobs stay on host)
   --wasm      browser wasm slice    (client/<rev>/wasm/tibia.*, .qtclient/wasm.json)
-  --desktop   tibia-desktop slice (engine-<platform> + content-desktop lists)
+  --desktop   qtclient-desktop slice (engine-<platform> + content-desktop lists)
   --assets    cdn-assets slice      (assets/{store,outfits,items}/*, content-things list, .qtclient/assets.json)
   --launcher  launcher slice        (launcher/<version>/*, .qtclient/launcher.json)
 

@@ -470,7 +470,7 @@ jobs:
           }
           QTCLIENT_PACKS="$prefix" bash scripts/lifecycle/build/wasm.sh
           bin=""
-          for cand in build/tibia-wasm/bin build/tibia-wasm; do
+          for cand in build/qtclient-wasm/bin build/qtclient-wasm; do
             if [[ -f "$cand/tibia.wasm" && -f "$cand/tibia.js" ]]; then
               bin="$cand"
               break
@@ -478,7 +478,7 @@ jobs:
           done
           [[ -n "$bin" ]] || {
             echo "::error::tip tibia.wasm missing after qtclient wasm build" >&2
-            find build/tibia-wasm -name 'tibia.*' 2>/dev/null | head -40 || true
+            find build/qtclient-wasm -name 'tibia.*' 2>/dev/null | head -40 || true
             exit 1
           }
           pack="$bin/mods/idleot"
@@ -492,7 +492,7 @@ jobs:
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/linked-tip"
-          bash scripts/lifecycle/package/pack-tibia-wasm.sh "$bin" "$RUNNER_TEMP/linked-tip"
+          bash scripts/lifecycle/package/pack-qtclient-wasm.sh "$bin" "$RUNNER_TEMP/linked-tip"
           tip_pack="$(find "$RUNNER_TEMP/linked-tip" -path '*/mods/idleot/mod.json' | head -1 | xargs dirname)"
           [[ -n "$tip_pack" && -f "$tip_pack/mod.json" ]] || tip_pack="$RUNNER_TEMP/linked-tip/mods/idleot"
           python3 "$GITHUB_WORKSPACE/scripts/stamp-mod-urls.py" "$tip_pack/mod.json" \
@@ -534,7 +534,7 @@ jobs:
             echo "::notice::QTCAAC_SYMBOL_UPLOAD_TOKEN not set — skip symbol upload"
             exit 0
           fi
-          sym="$(find _qtclient/build/tibia-wasm -name tibia.js.symbols | head -1)"
+          sym="$(find _qtclient/build/qtclient-wasm -name tibia.js.symbols | head -1)"
           tip="$(find "$RUNNER_TEMP/linked-tip/client" -mindepth 2 -maxdepth 2 -type d -name wasm | head -1)"
           [[ -n "$sym" && -n "$tip" ]] || { echo "::warning::no tibia.js.symbols or tip dir — skip"; exit 0; }
           rev="$(basename "$(dirname "$tip")")"

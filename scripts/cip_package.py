@@ -375,7 +375,7 @@ def pack_tree(out: Path, package_dir: Path, tree: Path) -> list[dict]:
 WEB_CLIENT_BIN = "bin"
 
 # Tip packs ship inside the web packages as desktop has them: mods/<id>/ next to
-# the binary (merge-pack-into-tip.sh / pack-tibia-wasm.sh). Never lib/ or native/ on
+# the binary (merge-pack-into-tip.sh / pack-qtclient-wasm.sh). Never lib/ or native/ on
 # the web: pack C++ is a static-ABI archive linked into tibia.wasm (desktop slices
 # keep mods/<id>/native/mod.* — they come from the engine tree, not from here);
 # the stamp / list files are packaging metadata.

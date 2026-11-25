@@ -4,7 +4,7 @@
 # tip artifacts (desktop: mods/idleot/native/mod.* MODULE; wasm: static-ABI pack inside
 # tibia.wasm — no stock-ORAS merge fallback).
 #
-# Tip images: tibia-wasm / tibia-desktop tagged by qtclient+pack
+# Tip images: qtclient-wasm / qtclient-desktop tagged by qtclient+pack
 #   (${idleot_client_sha}-host-${qtclient_sha}) and aliased to :${qtclient_sha}.
 name: Build client
 
@@ -66,7 +66,7 @@ env:
   IDLEOT_CLIENT_SHA: ${{ inputs.idleot_client_sha }}
   QTCLIENT_REPO: qtclient/qtclient
   IDLEOT_CLIENT_REPO: ${{ github.repository_owner }}/idleot-client
-  DESKTOP_IMAGE: tibia-desktop
+  DESKTOP_IMAGE: qtclient-desktop
   HOST_OWNER: qtclient
 
 jobs:
@@ -122,7 +122,7 @@ jobs:
 
           need_pack=false
           for slice in wasm desktop; do
-            image="tibia-wasm"
+            image="qtclient-wasm"
             [[ "$slice" == desktop ]] && image="$DESKTOP_IMAGE"
             if docker buildx imagetools inspect "$REGISTRY/$image:$pack_tag" >/dev/null 2>&1; then
               echo "$slice=true" >> "$GITHUB_OUTPUT"
@@ -262,13 +262,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push tibia-wasm tip (+ legacy otclient-wasm alias)
+      - name: Push qtclient-wasm tip (+ legacy tibia-wasm / otclient-wasm aliases)
         working-directory: ${{ runner.temp }}/slice
         run: |
           printf 'FROM scratch\nCOPY . /\n' > Dockerfile.slice
           pack_tag="${{ needs.check.outputs.pack_tag }}"
           docker buildx build --push --provenance=false --sbom=false \
             -f Dockerfile.slice \
+            -t "${{ env.REGISTRY }}/qtclient-wasm:${pack_tag}" \
+            -t "${{ env.REGISTRY }}/qtclient-wasm:${{ env.SHA }}" \
             -t "${{ env.REGISTRY }}/tibia-wasm:${pack_tag}" \
             -t "${{ env.REGISTRY }}/tibia-wasm:${{ env.SHA }}" \
             -t "${{ env.REGISTRY }}/otclient-wasm:${pack_tag}" \

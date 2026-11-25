@@ -223,7 +223,7 @@ jobs:
           PACK_SHA: ${{ needs.resolve.outputs.idleot_client_sha }}
           TIP_TAG: ${{ needs.build-client.outputs.tip_tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
-          DESKTOP_IMAGE: ${{ needs.build-client.outputs.desktop_image || 'tibia-desktop' }}
+          DESKTOP_IMAGE: ${{ needs.build-client.outputs.desktop_image || 'qtclient-desktop' }}
         run: |
           set -euo pipefail
           miss=0
@@ -237,7 +237,7 @@ jobs:
           }
           if [[ "$CLIENT" == true ]]; then
             tag="${TIP_TAG:-${PACK_SHA}-host-${QTCLIENT_SHA}}"
-            need "$REGISTRY/tibia-wasm:$tag"
+            need "$REGISTRY/qtclient-wasm:$tag"
             need "$REGISTRY/$DESKTOP_IMAGE:$tag"
             echo "### Client tip" >> "$GITHUB_STEP_SUMMARY"
             echo "- qtclient \`${QTCLIENT_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
@@ -553,14 +553,14 @@ jobs:
           RUNTIME_TAG: ${{ needs.bundle.outputs.runtime_tag }}
           CRYSTAL_SHA: ${{ needs.resolve.outputs.crystalserver_sha }}
           QTCLIENT_SHA: ${{ needs.resolve.outputs.qtclient_sha }}
-          DESKTOP_IMAGE: ${{ needs.build-client.outputs.desktop_image || 'tibia-desktop' }}
+          DESKTOP_IMAGE: ${{ needs.build-client.outputs.desktop_image || 'qtclient-desktop' }}
           LAUNCHER_VERSION: ${{ needs.build-launcher.outputs.version }}
         run: |
           retag() { docker buildx imagetools create -t "$REGISTRY/$1:latest" "$REGISTRY/$1:$2" && echo "$1:$2 -> latest"; }
           [[ "$SERVER" == success ]] && retag crystalserver "$CRYSTAL_SHA"
           if [[ "$PROMOTE" == success ]]; then
             if [[ "$CLIENT" == true ]]; then
-              retag tibia-wasm "$QTCLIENT_SHA"
+              retag qtclient-wasm "$QTCLIENT_SHA"
               retag "$DESKTOP_IMAGE" "$QTCLIENT_SHA"
             fi
             [[ -n "$LAUNCHER_VERSION" ]] && retag launcher "$LAUNCHER_VERSION"

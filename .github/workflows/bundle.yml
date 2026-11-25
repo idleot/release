@@ -48,14 +48,14 @@ on:
   workflow_dispatch:
     inputs:
       wasm_tag:
-        description: tibia-wasm tag (qtclient SHA or latest)
+        description: qtclient-wasm tag (qtclient SHA or latest)
         default: latest
       desktop_tag:
         description: desktop slice tag (otclient SHA or latest)
         default: latest
       desktop_image:
-        description: desktop slice image (default tibia-desktop)
-        default: "tibia-desktop"
+        description: desktop slice image (default qtclient-desktop)
+        default: "qtclient-desktop"
       assets_tag:
         description: cdn-assets tag
         default: latest
@@ -100,6 +100,15 @@ jobs:
         with:
           repository: ${{ github.repository }}
           ref: main
+
+      - name: Checkout portal CDN config (SoT)
+        uses: actions/checkout@v5
+        with:
+          repository: qtclient/portal
+          path: portal-cdn
+          sparse-checkout: |
+            apps/cdn
+          sparse-checkout-cone-mode: true
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -148,11 +157,11 @@ jobs:
         env:
           WASM_TAG: ${{ inputs.wasm_tag }}
           DESKTOP_TAG: ${{ inputs.desktop_tag }}
-          DESKTOP_IMAGE: ${{ inputs.desktop_image || 'tibia-desktop' }}
+          DESKTOP_IMAGE: ${{ inputs.desktop_image || 'qtclient-desktop' }}
           ASSETS_TAG: ${{ inputs.assets_tag }}
           LAUNCHER_TAG: ${{ inputs.launcher_tag }}
         run: |
-          bash scripts/extract-image.sh "$REGISTRY/tibia-wasm:${WASM_TAG}" / slices/wasm
+          bash scripts/extract-image.sh "$REGISTRY/qtclient-wasm:${WASM_TAG}" / slices/wasm
           bash scripts/extract-image.sh "$REGISTRY/${DESKTOP_IMAGE}:${DESKTOP_TAG}" / slices/desktop
           bash scripts/extract-image.sh "$REGISTRY/cdn-assets:${ASSETS_TAG}" / slices/assets
           bash scripts/extract-image.sh "$REGISTRY/launcher:${LAUNCHER_TAG}" / slices/launcher
@@ -204,8 +213,8 @@ jobs:
       - name: Runtime image tag
         id: runtime
         run: |
-          # Content-address nginx config + Dockerfile so Coolify only redeploys when they change.
-          hash="$(cat Dockerfile nginx.conf | sha256sum | cut -c1-12)"
+          # Content-address qtclient/portal apps/cdn so Coolify only redeploys when they change.
+          hash="$(cat portal-cdn/apps/cdn/Dockerfile portal-cdn/apps/cdn/nginx.conf | sha256sum | cut -c1-12)"
           echo "tag=runtime-${hash}" >> "$GITHUB_OUTPUT"
           echo "runtime_tag=runtime-${hash}" >> "$GITHUB_STEP_SUMMARY"
 
@@ -215,7 +224,8 @@ jobs:
       - name: Push thin runtime image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: portal-cdn/apps/cdn
+          file: portal-cdn/apps/cdn/Dockerfile
           push: true
           provenance: false
           sbom: false
