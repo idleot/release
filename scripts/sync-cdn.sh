@@ -30,6 +30,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cmd="${1:-}"
 shift || true
 
+# Keepalive + a few connection attempts: flip opens many short rsync sessions
+# and the host has reset mid-kex under load (v1.0.220 Deploy CDN).
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o BatchMode=yes
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+  -o ConnectionAttempts=3)
+
 setup_ssh() {
   if [[ -n "${CDN_SSH_KEY:-}" ]]; then
     umask 077
@@ -38,17 +44,35 @@ setup_ssh() {
       echo "::error::CDN_SSH_KEY does not look like a PEM private key"
       exit 1
     fi
-    SSH=(ssh -i "$KEY_FILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
-      -o BatchMode=yes "${CDN_SSH_USER}@${CDN_SSH_HOST}")
-    RSYNC_SSH="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+    SSH=(ssh -i "$KEY_FILE" -o IdentitiesOnly=yes "${SSH_OPTS[@]}"
+      "${CDN_SSH_USER}@${CDN_SSH_HOST}")
+    RSYNC_SSH="ssh -i $KEY_FILE -o IdentitiesOnly=yes ${SSH_OPTS[*]}"
   else
     echo "[sync-cdn] CDN_SSH_KEY unset — using default ssh identity for ${CDN_SSH_USER}@${CDN_SSH_HOST}"
-    SSH=(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "${CDN_SSH_USER}@${CDN_SSH_HOST}")
-    RSYNC_SSH="ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+    SSH=(ssh "${SSH_OPTS[@]}" "${CDN_SSH_USER}@${CDN_SSH_HOST}")
+    RSYNC_SSH="ssh ${SSH_OPTS[*]}"
   fi
 }
 
 remote() { "${SSH[@]}" "$@"; }
+
+# Retry rsync on unexplained SSH drops (exit 255 / connection reset by peer).
+rsync_retry() {
+  local attempt=1 max=5 rc
+  while true; do
+    if rsync "$@"; then
+      return 0
+    fi
+    rc=$?
+    # 255 = ssh protocol / connection failure; other codes are content errors.
+    if [[ $rc -ne 255 ]] || [[ $attempt -ge $max ]]; then
+      return "$rc"
+    fi
+    echo "[sync-cdn] rsync ssh drop (rc=$rc) — retry ${attempt}/${max} in $((attempt * 3))s"
+    sleep $((attempt * 3))
+    attempt=$((attempt + 1))
+  done
+}
 
 # Coolify names dockerimage apps as <uuid>-<timestamp>, not idleot-cdn.
 # Prefer image ghcr.io/idleot/cdn; fall back to name / mount path.
@@ -124,7 +148,7 @@ push_immutable() {
   local name="$1"
   [[ -d "${site}/${name}" ]] || return 0
   remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
-  rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+  rsync_retry -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
     "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
 }
 
@@ -133,7 +157,7 @@ push_mutable() {
   local name="$1"
   [[ -d "${site}/${name}" ]] || return 0
   remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
-  rsync -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+  rsync_retry -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
     "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
 }
 
@@ -142,7 +166,7 @@ replace_tree() {
   local name="$1"
   [[ -d "${site}/${name}" ]] || return 0
   remote "mkdir -p '${CDN_REMOTE_ROOT}/html/${name}'"
-  rsync -a --delete "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+  rsync_retry -a --delete "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
     "${site}/${name}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${name}/"
 }
 
@@ -167,7 +191,7 @@ push_blobs() {
           for list in assets.json assets-macos.json assets.json.sha256; do
             [[ -f "${child}/${list}" ]] || continue
             # Readable by nginx whatever the CI umask was (setup_ssh sets 077).
-            rsync -a --chmod=F644 "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+            rsync_retry -a --chmod=F644 "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
               "${child}/${list}" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/assets-current/${list}"
           done
         else
@@ -191,7 +215,7 @@ push_blobs() {
         fi
       elif [[ -d "$child" ]]; then
         remote "mkdir -p '${CDN_REMOTE_ROOT}/html/launcher/${name}'"
-        rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+        rsync_retry -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
           "${child}/" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/${name}/"
       else
         # Tip manifests + /download archives must overwrite — --ignore-existing
@@ -199,11 +223,11 @@ push_blobs() {
         # while latest/desktop.json already advertised a new hash.
         case "$name" in
           tibiametadata.json|hints.json|*.json.version|IdleOT-*.dmg|IdleOT-*.zip|IdleOT-*.appimage|IdleOT-*.exe)
-            rsync -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+            rsync_retry -a "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
               "$child" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/"
             ;;
           *)
-            rsync -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
+            rsync_retry -a --ignore-existing "${RSYNC_STATS[@]}" -e "$RSYNC_SSH" \
               "$child" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/launcher/"
             ;;
         esac
@@ -291,7 +315,7 @@ EOF
       if [[ ! -d "${site}/releases/${name}" ]]; then
         echo "[sync-cdn] merge host releases/${name} into site before flip"
         mkdir -p "${site}/releases/${name}"
-        rsync -a -e "$RSYNC_SSH" \
+        rsync_retry -a -e "$RSYNC_SSH" \
           "${CDN_SSH_USER}@${CDN_SSH_HOST}:${d}/" "${site}/releases/${name}/"
       fi
     done
@@ -300,7 +324,7 @@ EOF
 
   for f in healthz hints.json; do
     if [[ -f "${site}/${f}" ]]; then
-      rsync -a -e "$RSYNC_SSH" "${site}/${f}" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${f}"
+      rsync_retry -a -e "$RSYNC_SSH" "${site}/${f}" "${CDN_SSH_USER}@${CDN_SSH_HOST}:${CDN_REMOTE_ROOT}/html/${f}"
     fi
   done
 
