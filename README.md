@@ -146,8 +146,7 @@ as `IDLEOT_CDN_URL`. Tip `tibiametadata.json` absolute URLs also use static.
 
 ## Binary pack / update contract (CIP)
 
-Desktop and browser share one tip protocol (see
-[`docs/reverse-engineering/cip-package-layout.md`](../../docs/reverse-engineering/cip-package-layout.md)):
+Desktop and browser share one CIP package protocol:
 
 | Layer | CDN path | Installer |
 |-------|----------|-----------|

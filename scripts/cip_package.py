@@ -35,7 +35,7 @@ OTC = _ROOT / "qtclient" if (_ROOT / "qtclient").is_dir() else _ROOT / "otclient
 
 # Tip packages[].directoryname → packages/<name>/ on disk (also used as name).
 # CipSoft: "Tibia" — packages/Tibia on Linux/Windows, packages/Tibia.app on macOS
-# (the launcher adds .app there). See docs/reverse-engineering/cip-package-layout.md.
+# (the launcher adds .app there). See CIP package layout (packages/<name>/).
 # CipSoft tip variants: regular | preview | test | beta.
 # Local launcher-first play emits its own tip (apps/qtclient emit_play_tip.py).
 CLIENT_PACKAGE_DIR = "IdleOT"
@@ -214,7 +214,7 @@ def cip_package_version(fallback: str = "0", prefer_fallback: bool = False) -> s
     return f"{cip}.{sha[:6]}"
 
 
-# CipSoft asset layouts (docs/reverse-engineering/cip-package-layout.md):
+# CipSoft asset layouts (CIP package layout (packages/<name>/)):
 # assets.json (Windows, Linux, web) installs at the package root next to bin/,
 # assets-macos.json inside the bundle.
 ASSET_LAYOUTS = {
@@ -538,7 +538,7 @@ def emit_cip(
                     raise SystemExit(
                         f"[assemble] macOS client package has nested .app localfiles "
                         f"(e.g. {nested[0]}) — engine list must start at Contents/ "
-                        f"(packages/IdleOT.app is the bundle; see cip-package-layout.md)"
+                        f"(packages/IdleOT.app is the bundle; CIP packages/<name>/ layout)"
                     )
                 if not exe.startswith("Contents/MacOS/"):
                     raise SystemExit(
